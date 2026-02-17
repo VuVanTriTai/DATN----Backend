@@ -1,4 +1,4 @@
-const Attenpt = require("../models/Attempt");
+const Attempt = require("../models/Attempt");
 
 const getUserAttempts = async (req, res) => {
   try {
@@ -8,22 +8,25 @@ const getUserAttempts = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Attempt không tìm thấy" });
-    };
+    }
 
     res.status(200).json(attempts);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };
 
 const getAttemptByQuizId = async (req, res) => {
   try {
-    const attempts = await Attempt.find({ quiz: req.params.id, user: req.user.id }).sort({ attemptNumber: 1 });
+    const attempts = await Attempt.find({
+      quiz: req.params.id,
+      user: req.user.id,
+    }).sort({ attemptNumber: 1 });
     if (!attempts || attempts.length === 0) {
       return res
         .status(404)
         .json({ success: false, message: "Attempt không tìm thấy" });
-    };
+    }
 
     res.status(200).json(attempts);
   } catch (error) {
@@ -33,12 +36,16 @@ const getAttemptByQuizId = async (req, res) => {
 
 const getAttemptByNumber = async (req, res) => {
   try {
-    const attempt = await Attempt.findOne({ quiz: req.params.id, user: req.user.id, attemptNumber: req.params.number });
+    const attempt = await Attempt.findOne({
+      quiz: req.params.id,
+      user: req.user.id,
+      attemptNumber: req.params.number,
+    });
     if (!attempt) {
       return res
         .status(404)
         .json({ success: false, message: "Attempt không tìm thấy" });
-    };
+    }
 
     res.status(200).json(attempt);
   } catch (error) {
@@ -51,5 +58,3 @@ module.exports = {
   getAttemptByQuizId,
   getAttemptByNumber,
 };
-
-
