@@ -3,76 +3,100 @@ const Attempt = require("../models/Attempt");
 const OpenAI = require("openai");
 
 const client = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY,
-  baseURL: "https://api.groq.com/openai/v1",
+  apiKey: process.env.GEMINI_API_KEY,
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
 });
 
 const generateQuiz = async (req, res) => {
   try {
-    const { title, topic, numQuestions, difficulty, questionType, timeLimit } =
+    const { title, topic, numQuestions, difficulty, questionType, timeLimit, maxAttempts } =
       req.body;
     const owner = req.user.id;
 
     // Tạo prompt cho AI
     const prompt = `
-    Hệ thống phản hồi dưới dạng JSON thuần túy.
-    Không bao gồm markdown, không giải thích, không văn bản thừa.
+      Hệ thống phản hồi dưới dạng JSON thuần túy.
+      Không bao gồm markdown, không giải thích, không văn bản thừa.
 
-    Nhiệm vụ:
-    Tạo ${numQuestions} câu hỏi trắc nghiệm theo chủ đề "${title}" được mô tả "${topic}" với độ khó "${difficulty}".
-    Ngôn ngữ: Tiếng Việt.
+      Nhiệm vụ:
+      Tạo ${numQuestions} câu hỏi trắc nghiệm theo chủ đề "${title}" có nội dung "${topic}" với độ khó "${difficulty}".
+      Ngôn ngữ: Tiếng Việt.
 
-    Loại câu hỏi: ${questionType}.
+      Loại câu hỏi: ${questionType}.
 
-    Các giá trị hợp lệ của questionType:
-    - "T/F" → Câu hỏi Đúng/Sai (chỉ có 2 đáp án: ["Đúng", "Sai"])
-    - "singleChoice" → Chọn 1 đáp án đúng (4 đáp án)
-    - "multipleChoice" → Chọn nhiều đáp án đúng (4 đáp án)
-    - "mixed" → Kết hợp nhiều loại câu hỏi trong cùng 1 quiz
+      Các giá trị hợp lệ của questionType:
 
-    Yêu cầu quan trọng:
+      1. "multipleStatements":
+      - Câu hỏi phải chứa đúng 4 mệnh đề được đánh số 1., 2., 3., 4. (hãy thiết kế các mệnh đề đúng và sai xen kẽ), ví dụ:
+        "1. 1+1=2
+        2. 2+3=6
+        3. 3+3=9
+        4. 4+4=8"
+      - 4 mệnh đề phải nằm trong field "text".
+      - Các phương án trả lời phải là tổ hợp của các mệnh đề, ví dụ:
+        "1 và 3 đúng"
+        "1, 2 và 4 đúng"
+        "Chỉ 2 sai"
+        "Cả 4 mệnh đề đều đúng"
+      - Có đúng 4 options.
+      - Chỉ có 1 đáp án hoàn toàn chính xác.
+      - correctAnswer là số từ 0 đến 3.
 
-    1. Nếu questionType = "T/F"
-    - options phải là ["Đúng", "Sai"]
-    - correctAnswer là số (0 nếu "Đúng", 1 nếu "Sai")
+      2. "singleChoice":
+      - Câu hỏi bình thường.
+      - Có đúng 4 options.
+      - Chỉ có 1 đáp án đúng.
+      - correctAnswer là số từ 0 đến 3.
 
-    2. Nếu questionType = "singleChoice"
-    - Có 4 đáp án
-    - correctAnswer là số (0-3)
+      3. "multipleChoice":
+      - Có đúng 4 options.
+      - Có thể có nhiều đáp án đúng.
+      - correctAnswer là mảng số (ví dụ: [0,2]).
 
-    3. Nếu questionType = "multipleChoice"
-    - Có 4 đáp án
-    - correctAnswer là mảng số (ví dụ: [0,2])
+      4. "mixed":
+      4. Nếu questionType là "mixed":
+      - Mỗi câu hỏi phải có field "questionType".
+      - Giá trị chỉ được là:
+        "singleChoice"
+        "multipleChoice"
+        "multipleStatements"
+      - Không được dùng "mixed" trong questionType của câu hỏi.
 
-    4. Nếu questionType = "mixed"
-    - Mỗi câu hỏi phải có thêm field "questionType"
-    - Mỗi câu sẽ thuộc một trong 3 loại: "T/F", "singleChoice", "multipleChoice"
-    - correctAnswer phải đúng theo từng loại
+      Cấu trúc JSON bắt buộc:
 
-    Cấu trúc JSON phải chính xác như sau:
+      {
+        "questions": [
+          {
+            "questionType": "multipleStatements | singleChoice | multipleChoice",
+            "text": "Nội dung câu hỏi (nếu multipleStatements phải chứa 4 mệnh đề đánh số 1.,2.,3.,4.)",
+            "options": ["Đáp án A", "Đáp án B", "Đáp án C", "Đáp án D"],
+            "correctAnswer": 0,
+            "explanation": "Giải thích rõ vì sao đáp án đúng."
+          }
+        ]
+      }
 
-    {
-      "questions": [
-        {
-          "questionType": "T/F | singleChoice | multipleChoice",
-          "text": "Nội dung câu hỏi?",
-          "options": ["Đáp án A", "Đáp án B"], // Tối thiểu 2 đáp án, tối đa 4 đáp án tùy loại câu hỏi, các lựa chọn phải khác nhau
-          "correctAnswer": 0, // Nếu singleChoice hoặc T/F: số (index của đáp án đúng). Nếu multipleChoice: mảng số (index của các đáp án đúng)
-          "explanation": "Giải thích đáp án đúng."
-        }
-      ]
-    }
-
-    Lưu ý:
-    - Không thêm bất kỳ văn bản nào ngoài JSON.
-    - Không thêm ký tự thừa.
+      Quy tắc bắt buộc:
+      - Text phải chứa đúng 4 mệnh đề.
+      - Mỗi mệnh đề phải bắt đầu bằng:
+        1.
+        2.
+        3.
+        4.
+      - Mỗi mệnh đề phải nằm trên một dòng riêng.
+      - Không được tạo ít hơn hoặc nhiều hơn 4 mệnh đề.
+      - Explanation phải nhất quán với correctAnswer.
+      - Không được tự mâu thuẫn logic toán học hoặc kiến thức cơ bản.
+      - Không thêm bất kỳ văn bản nào ngoài JSON.
+      - Không thêm ký tự thừa.
     `;
+
 
     // Call API AI
     const completion = await client.chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "gemini-3-flash-preview",
       messages: [{ role: "user", content: prompt }],
-      temperature: 0.7,
+      // temperature: 0.7,
     });
 
     const aiText = completion.choices[0].message.content;
@@ -82,11 +106,13 @@ const generateQuiz = async (req, res) => {
     // Lưu trữ quiz vào database
     const newQuiz = new Quiz({
       title,
+      topic,
       numQuestions,
       difficulty,
       questionType,
       timeLimit,
       owner,
+      maxAttempts,
       questions: questionsData.questions,
     });
     await newQuiz.save();
@@ -140,9 +166,12 @@ const getQuizPublic = async (req, res) => {
     res.status(200).json({
       id: quiz._id,
       title: quiz.title,
+      topic: quiz.topic,
       difficulty: quiz.difficulty,
       timeLimit: quiz.timeLimit,
+      maxAttempts: quiz.maxAttempts,
       questions: quiz.questions.map((q) => ({
+        questionType: q.questionType,
         text: q.text,
         options: q.options,
       })),
@@ -182,10 +211,8 @@ const submitQuiz = async (req, res) => {
     let score = 0;
     quiz.questions.forEach((q, index) => {
       const userAnswer = answers[index];
-      const questionType =
-        q.questionType ||
-        quiz.questionType ||
-        (Array.isArray(q.correctAnswer) ? "multipleChoice" : "singleChoice");
+
+      const questionType = q.questionType || quiz.questionType;
 
       const isUnanswered =
         userAnswer === null ||
@@ -193,7 +220,7 @@ const submitQuiz = async (req, res) => {
         (Array.isArray(userAnswer) && userAnswer.length === 0);
       if (isUnanswered) return;
 
-      if (questionType === "T/F" || questionType === "singleChoice") {
+      if (questionType === "multipleStatements" || questionType === "singleChoice") {
         if (Number(userAnswer) === Number(q.correctAnswer)) score++;
         return;
       }
@@ -246,8 +273,7 @@ const submitQuiz = async (req, res) => {
 
 const updateQuiz = async (req, res) => {
   try {
-    const { title, topic, numQuestions, timeLimit, difficulty, questions } =
-      req.body;
+    const { title, topic, timeLimit, difficulty, maxAttempts, questions } = req.body;
     const quiz = await Quiz.findById(req.params.id);
     if (!quiz)
       return res
@@ -262,9 +288,10 @@ const updateQuiz = async (req, res) => {
 
     quiz.title = title;
     quiz.topic = topic;
-    quiz.numQuestions = numQuestions;
-    quiz.timeLimit = timeLimit;
+    quiz.numQuestions = questions.length;
     quiz.difficulty = difficulty;
+    quiz.timeLimit = timeLimit;
+    quiz.maxAttempts = maxAttempts;
     quiz.questions = questions;
 
     await quiz.save();
@@ -289,23 +316,31 @@ const startQuiz = async (req, res) => {
 
     const userId = req.user.id;
 
-    // Đếm số lần đã làm
-    const attemptCount = await Attempt.countDocuments({
-      user: userId,
-      quiz: quiz._id,
-    });
+    if (quiz.owner.toString() !== userId) {
+      // Đếm số lần đã làm
+      const attemptCount = await Attempt.countDocuments({
+        user: userId,
+        quiz: quiz._id,
+      });
 
-    if (quiz.maxAttempts && attemptCount >= quiz.maxAttempts) {
-      return res.status(403).json({
-        success: false,
-        message: "Bạn đã hết số lần làm bài",
+      if (quiz.maxAttempts && attemptCount >= quiz.maxAttempts) {
+        return res.status(403).json({
+          success: false,
+          message: "Bạn đã hết số lần làm bài",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        remainingAttempts: quiz.maxAttempts - attemptCount,
+        quizId: quiz._id,
       });
     }
 
     res.status(200).json({
       success: true,
-      remainingAttempts: quiz.maxAttempts - attemptCount,
-      quiz,
+      message: "Chủ sở hữu quiz được phép làm bài vô hạn",
+      quizId: quiz._id,
     });
   } catch (error) {
     res.status(500).json({

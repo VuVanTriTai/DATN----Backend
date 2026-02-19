@@ -18,10 +18,10 @@ router.get("/public/:id", quizController.getQuizPublic);
 // POST /api/quiz/submit (Cần token))
 router.post("/submit/:id", verifyToken, quizController.submitQuiz);
 
-// PUT /api/quiz/update (Cần token)
-router.put("/update/:id", verifyToken, quizController.updateQuiz);
+// PUT /api/quiz/:id (Cần token)
+router.put("/:id", verifyToken, quizController.updateQuiz);
 
-// POST /api/quiz/:id/start (Cần token)
-router.post("/:id/start", verifyToken, quizController.startQuiz);
+// POST /api/quiz/start/:id (Cần token)
+router.post("/start/:id", verifyToken, quizController.startQuiz);
 
 module.exports = router;
