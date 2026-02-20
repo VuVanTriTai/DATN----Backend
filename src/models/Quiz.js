@@ -30,8 +30,8 @@ const quizSchema = new mongoose.Schema(
       enum: ["multipleStatements", "singleChoice", "multipleChoice", "mixed"],
       default: "singleChoice",
     },
-    timeLimit: { type: Number, required: true }, // tính theo giây
-    maxAttempts: { type: Number, required: true },
+    timeLimit: { type: Number, required: false }, // tính theo giây
+    maxAttempts: { type: Number, required: false }, // số lần attempt tối đa
     questions: { type: [Question] },
     createdAt: { type: Date, default: Date.now },
     isDeleted: { type: Boolean, default: false },
