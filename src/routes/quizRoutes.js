@@ -24,4 +24,7 @@ router.put("/:id", verifyToken, quizController.updateQuiz);
 // POST /api/quiz/start/:id (Cần token)
 router.post("/start/:id", verifyToken, quizController.startQuiz);
 
+// DELETE /api/quiz/:id (Cần token)
+router.delete("/:id", verifyToken, quizController.deleteQuiz);
+
 module.exports = router;

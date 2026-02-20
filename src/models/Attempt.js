@@ -17,6 +17,8 @@ const attemptSchema = new mongoose.Schema(
         answers: { type: mongoose.Schema.Types.Mixed, required: true }, // lưu trữ câu trả lời của người dùng
         score: { type: Number, required: true },
         totalQuestions: { type: Number, required: true },
+        isDeleted: { type: Boolean, default: false },
+        deleteAt: { type: Date, default: null },
     }
 );
 

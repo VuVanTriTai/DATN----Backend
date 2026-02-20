@@ -18,7 +18,6 @@ const Question = new mongoose.Schema(
 const quizSchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
-    topic: { type: String, required: true },
     numQuestions: { type: Number, required: true },
     difficulty: { type: String, required: true },
     owner: {
@@ -31,10 +30,12 @@ const quizSchema = new mongoose.Schema(
       enum: ["multipleStatements", "singleChoice", "multipleChoice", "mixed"],
       default: "singleChoice",
     },
-    timeLimit: { type: Number, required: false }, // tính theo phút
-    maxAttempts: { type: Number, required: false },
+    timeLimit: { type: Number, required: true }, // tính theo giây
+    maxAttempts: { type: Number, required: true },
     questions: { type: [Question] },
     createdAt: { type: Date, default: Date.now },
+    isDeleted: { type: Boolean, default: false },
+    deleteAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

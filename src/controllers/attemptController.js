@@ -2,7 +2,7 @@ const Attempt = require("../models/Attempt");
 
 const getUserAttempts = async (req, res) => {
   try {
-    const attempts = await Attempt.find({ user: req.user.id });
+    const attempts = await Attempt.find({ user: req.user.id, isDeleted: false });
 
     if (!attempts || attempts.length === 0) {
       return res
@@ -22,7 +22,7 @@ const getAttemptByQuizId = async (req, res) => {
       quiz: req.params.id,
       user: req.user.id,
       attemptNumber: req.params.number || 1,
-
+      isDeleted: false,
     }).sort({ attemptNumber: 1 });
     
     if (!attempts || attempts.length === 0) {

@@ -106,7 +106,6 @@ const generateQuiz = async (req, res) => {
     // Lưu trữ quiz vào database
     const newQuiz = new Quiz({
       title,
-      topic,
       numQuestions,
       difficulty,
       questionType,
@@ -128,7 +127,7 @@ const generateQuiz = async (req, res) => {
 
 const getAllQuizzes = async (req, res) => {
   try {
-    const quizzes = await Quiz.find({ owner: req.user.id });
+    const quizzes = await Quiz.find({ owner: req.user.id, isDeleted: false });
     res.status(200).json(quizzes);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -137,7 +136,7 @@ const getAllQuizzes = async (req, res) => {
 
 const getQuizById = async (req, res) => {
   try {
-    const quiz = await Quiz.findById(req.params.id);
+    const quiz = await Quiz.findById({ _id: req.params.id, isDeleted: false });
     if (!quiz)
       return res
         .status(404)
@@ -157,7 +156,7 @@ const getQuizById = async (req, res) => {
 
 const getQuizPublic = async (req, res) => {
   try {
-    const quiz = await Quiz.findById(req.params.id);
+    const quiz = await Quiz.findById({ _id: req.params.id, isDeleted: false });
     if (!quiz)
       return res
         .status(404)
@@ -166,7 +165,6 @@ const getQuizPublic = async (req, res) => {
     res.status(200).json({
       id: quiz._id,
       title: quiz.title,
-      topic: quiz.topic,
       difficulty: quiz.difficulty,
       timeLimit: quiz.timeLimit,
       maxAttempts: quiz.maxAttempts,
@@ -183,7 +181,7 @@ const getQuizPublic = async (req, res) => {
 
 const submitQuiz = async (req, res) => {
   try {
-    const quiz = await Quiz.findById(req.params.id);
+    const quiz = await Quiz.findById({ _id: req.params.id, isDeleted: false });
     if (!quiz)
       return res
         .status(404)
@@ -273,8 +271,8 @@ const submitQuiz = async (req, res) => {
 
 const updateQuiz = async (req, res) => {
   try {
-    const { title, topic, timeLimit, difficulty, maxAttempts, questions } = req.body;
-    const quiz = await Quiz.findById(req.params.id);
+    const { title, timeLimit, difficulty, maxAttempts, questions } = req.body;
+    const quiz = await Quiz.findById({ _id: req.params.id, isDeleted: false });
     if (!quiz)
       return res
         .status(404)
@@ -287,7 +285,6 @@ const updateQuiz = async (req, res) => {
     }
 
     quiz.title = title;
-    quiz.topic = topic;
     quiz.numQuestions = questions.length;
     quiz.difficulty = difficulty;
     quiz.timeLimit = timeLimit;
@@ -306,7 +303,7 @@ const updateQuiz = async (req, res) => {
 
 const startQuiz = async (req, res) => {
   try {
-    const quiz = await Quiz.findById(req.params.id);
+    const quiz = await Quiz.findById({ _id: req.params.id, isDeleted: false });
     if (!quiz) {
       return res.status(404).json({
         success: false,
@@ -350,6 +347,37 @@ const startQuiz = async (req, res) => {
   }
 };
 
+const deleteQuiz = async (req, res) => {
+  try {
+    const quiz = await Quiz.findById({ _id: req.params.id, isDeleted: false });
+    if (!quiz)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quiz không tìm thấy" });
+
+    if (quiz.owner.toString() !== req.user.id) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Không có quyền xóa quiz này" });
+    }
+
+    quiz.isDeleted = true;
+    quiz.deleteAt = new Date();
+    await quiz.save();
+
+    const attempts = await Attempt.find({ quiz: quiz._id, isDeleted: false });
+    for (const attempt of attempts) {
+      attempt.isDeleted = true;
+      attempt.deleteAt = new Date();
+      await attempt.save();
+    }
+    
+    res.status(200).json({ success: true, message: "Xóa quiz thành công" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   generateQuiz,
   getQuizById,
@@ -358,4 +386,5 @@ module.exports = {
   submitQuiz,
   updateQuiz,
   startQuiz,
+  deleteQuiz,
 };
