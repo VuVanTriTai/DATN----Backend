@@ -12,6 +12,7 @@ const attemptSchema = new mongoose.Schema(
             ref: 'Quiz',
             required: true,
         },
+        quizTitle: { type: String, required: true }, 
         attemptNumber: { type: Number, required: true }, // attempt thứ mấy của quiz này
         duration: { type: Number, required: true }, // tính bằng giây
         answers: { type: mongoose.Schema.Types.Mixed, required: true }, // lưu trữ câu trả lời của người dùng
@@ -19,7 +20,8 @@ const attemptSchema = new mongoose.Schema(
         totalQuestions: { type: Number, required: true },
         isDeleted: { type: Boolean, default: false },
         deleteAt: { type: Date, default: null },
-    }
+    },
+    { timestamps: true },
 );
 
 module.exports = mongoose.model('Attempt', attemptSchema);

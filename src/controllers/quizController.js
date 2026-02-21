@@ -247,6 +247,7 @@ const submitQuiz = async (req, res) => {
     const attempt = await Attempt.create({
       user: userId,
       quiz: quiz._id,
+      quizTitle: quiz.title,
       attemptNumber,
       duration,
       answers,
@@ -254,14 +255,7 @@ const submitQuiz = async (req, res) => {
       totalQuestions: total,
     });
 
-    res.status(200).json({
-      success: true,
-      attemptNumber,
-      score,
-      total,
-      duration,
-      attemptId: attempt._id,
-    });
+    res.status(200).json({ success: true, attempt });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
