@@ -255,7 +255,7 @@ const submitQuiz = async (req, res) => {
       totalQuestions: total,
     });
 
-    res.status(200).json({ success: true, attempt });
+    res.status(200).json({ success: true, attempt, quiz });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
