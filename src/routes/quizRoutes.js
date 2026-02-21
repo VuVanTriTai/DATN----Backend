@@ -9,16 +9,22 @@ router.post("/generate", verifyToken, quizController.generateQuiz);
 // GET /api/quiz (Cần token)
 router.get("/", verifyToken, quizController.getAllQuizzes);
 
-// GET /api/quiz/public/:id (Không cần token)
-router.get("/public/:id", quizController.getQuizPublic);
-
-// POST /api/quiz/:id/submit (Không cần token)
-router.post("/:id/submit", quizController.submitQuiz);
-
 // GET /api/quiz/:id (Cần token và check owner)
 router.get("/:id", verifyToken, quizController.getQuizById);
 
-// PUT /api/quiz/:id (Cần token và check owner)
+// GET /api/quiz/public/:id (Không cần token)
+router.get("/public/:id", quizController.getQuizPublic);
+
+// POST /api/quiz/submit (Cần token))
+router.post("/submit/:id", verifyToken, quizController.submitQuiz);
+
+// PUT /api/quiz/:id (Cần token)
 router.put("/:id", verifyToken, quizController.updateQuiz);
+
+// POST /api/quiz/start/:id (Cần token)
+router.post("/start/:id", verifyToken, quizController.startQuiz);
+
+// DELETE /api/quiz/:id (Cần token)
+router.delete("/:id", verifyToken, quizController.deleteQuiz);
 
 module.exports = router;
