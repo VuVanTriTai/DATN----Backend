@@ -6,7 +6,7 @@ const verifyToken = require("../middlewares/authMiddleware");
 // GET /api/attempt (Cần token)
 router.get("/", verifyToken, attemptController.getUserAttempts);
 
-// GET /api/attempt/:id/:number (Cần token)
-router.get("/:id/:number", verifyToken, attemptController.getAttemptByQuizId);
+// GET /api/attempt/:id (Cần token)
+router.get("/:id", verifyToken, attemptController.getAttemptById);
 
 module.exports = router;

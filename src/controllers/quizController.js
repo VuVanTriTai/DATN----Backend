@@ -1,6 +1,7 @@
 const Quiz = require("../models/Quiz");
 const Attempt = require("../models/Attempt");
 const OpenAI = require("openai");
+const paginate = require("../utils/paginate");
 
 const client = new OpenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -125,7 +126,22 @@ const generateQuiz = async (req, res) => {
 
 const getAllQuizzes = async (req, res) => {
   try {
-    const quizzes = await Quiz.find({ owner: req.user.id, isDeleted: false }).select("-isDeleted -deleteAt");
+    const quizzes = await paginate(
+      Quiz,
+      { owner: req.user.id, isDeleted: false },
+      {
+        page: req.query.page,
+        limit: req.query.limit,
+        select: "-isDeleted -deleteAt",
+      },
+    );
+
+    if (quizzes.data.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Không tìm thấy quiz nào" });
+    }
+
     res.status(200).json(quizzes);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -370,6 +386,34 @@ const deleteQuiz = async (req, res) => {
   }
 };
 
+const searchQuizzes = async (req, res) => {
+  try {
+    const { keyword } = req.query;
+
+    if (!keyword || keyword.trim() === "") {
+      return res.status(400).json({ success: false, message: "Keyword không được để trống" });
+    }
+
+    const quizzes = await paginate(
+      Quiz,
+      {
+        $text: { $search: keyword },
+        private: false,
+        isDeleted: false,
+      },
+      {
+        page: req.query.page,
+        limit: req.query.limit,
+        select: "-isDeleted -deleteAt",
+      }
+    );
+
+    res.status(200).json({ quizzes });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   generateQuiz,
   getQuizById,
@@ -379,4 +423,5 @@ module.exports = {
   updateQuiz,
   startQuiz,
   deleteQuiz,
+  searchQuizzes,
 };
