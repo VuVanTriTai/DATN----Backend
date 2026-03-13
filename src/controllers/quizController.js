@@ -1,17 +1,13 @@
 const Quiz = require("../models/Quiz");
 const Attempt = require("../models/Attempt");
-const OpenAI = require("openai");
+const Groq = require("groq-sdk"); // Thay đổi ở đây
 const paginate = require("../utils/paginate");
 
-const client = new OpenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
-});
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const generateQuiz = async (req, res) => {
   try {
-    const { title, topic, numQuestions, difficulty, questionType } =
-      req.body;
+    const { title, topic, numQuestions, difficulty, questionType } = req.body;
     const owner = req.user.id;
 
     // Tạo prompt cho AI
@@ -94,17 +90,20 @@ const generateQuiz = async (req, res) => {
 
 
     // Call API AI
-    const completion = await client.chat.completions.create({
-      model: "gemini-3-flash-preview",
-      messages: [{ role: "user", content: prompt }],
-      // temperature: 0.7,
+    // Gọi API Groq
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile", // Hoặc mixtral-8x7b-32768
+      messages: [
+        { role: "system", content: "Bạn là hệ thống tạo câu hỏi trắc nghiệm, luôn trả về JSON thuần túy." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.7,
+      response_format: { type: "json_object" }
     });
 
     const aiText = completion.choices[0].message.content;
-    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
-    const questionsData = JSON.parse(jsonMatch[0]);
+    const questionsData = JSON.parse(aiText);
 
-    // Lưu trữ quiz vào database
     const newQuiz = new Quiz({
       title,
       numQuestions,
@@ -117,10 +116,8 @@ const generateQuiz = async (req, res) => {
 
     res.status(201).json({ success: true, quizId: newQuiz._id });
   } catch (error) {
-    console.error("Generate quiz error:", error);
-    res
-      .status(500)
-      .json({ success: false, message: "Lỗi khi tạo quiz bằng AI" });
+    console.error("Groq Generate quiz error:", error);
+    res.status(500).json({ success: false, message: "Lỗi khi tạo quiz bằng Groq" });
   }
 };
 

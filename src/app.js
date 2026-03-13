@@ -10,6 +10,15 @@ const attemptRoutes = require("./routes/attemptRoutes");
 // --- Import các Routes mới ---
 const fileRoutes = require("./routes/fileRoutes"); // Route trích xuất văn bản (PDF, OCR...)
 const planRoutes = require("./routes/planRoutes"); // Route tạo lộ trình học tập (Study Plan)
+const aiRoutes = require('./routes/aiRoutes'); // Route hỏi đáp AI (Semantic Search + LLM)
+
+//const fileRoutes = require("./routes/fileRoutes");
+
+
+
+
+const courseRoutes = require('./routes/courseRoutes');
+
 
 const app = express();
 
@@ -39,6 +48,14 @@ app.use("/api/attempt", attemptRoutes);
 app.use("/api/file", fileRoutes);
 
 // 5. Hệ thống Lộ trình học tập (Mới - AI Study Plan & Lessons)
+app.use("/api/plan", planRoutes);
+
+
+
+app.use("/api/ai", aiRoutes);
+app.use("/api/course", courseRoutes);
+app.use("/api/file", fileRoutes); // Phải có dòng này thì đường dẫn /api/file/extract mới chạy
+
 app.use("/api/plan", planRoutes);
 
 
