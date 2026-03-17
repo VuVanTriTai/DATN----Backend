@@ -2,6 +2,7 @@ const Quiz = require("../models/Quiz");
 const Attempt = require("../models/Attempt");
 const Groq = require("groq-sdk"); // Thay đổi ở đây
 const paginate = require("../utils/paginate");
+const Lesson = require("../models/Lesson");
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -410,6 +411,56 @@ const searchQuizzes = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+const submitLessonQuiz = async (req, res) => {
+    try {
+        const { planId, dayNumber, answers } = req.body; // answers: {0: 1, 1: 0...}
+        const userId = req.user.id;
+
+        // 1. Tìm bài học để lấy bộ câu hỏi gốc
+        const lesson = await Lesson.findOne({ planId, dayNumber });
+        if (!lesson) return res.status(404).json({ success: false, message: "Không tìm thấy bài học" });
+
+        let score = 0;
+        const totalQuestions = lesson.quiz.length;
+        
+        // 2. Chấm điểm
+        const results = lesson.quiz.map((q, index) => {
+            const userAnswer = answers[index];
+            const isCorrect = Number(userAnswer) === q.correctAnswer;
+            if (isCorrect) score++;
+            return {
+                question: q.question,
+                isCorrect,
+                correctAnswer: q.correctAnswer,
+                userAnswer: userAnswer,
+                explanation: q.explanation
+            };
+        });
+
+        // 3. Cập nhật trạng thái bài học thành 'completed'
+        lesson.status = 'completed';
+        await lesson.save();
+
+        // 4. (Tùy chọn) Mở khóa bài học tiếp theo (Ngày n + 1)
+        await Lesson.findOneAndUpdate(
+            { planId, dayNumber: Number(dayNumber) + 1 },
+            { status: 'in-progress' }
+        );
+
+        res.status(200).json({
+            success: "true",
+            data: {
+        score: score,
+        totalQuestions: totalQuestions,
+        results: results, // Mảng chi tiết đúng sai
+        percentage: Math.round((score / totalQuestions) * 100)
+    }
+});
+
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
 
 module.exports = {
   generateQuiz,
@@ -421,4 +472,5 @@ module.exports = {
   startQuiz,
   deleteQuiz,
   searchQuizzes,
+  submitLessonQuiz,
 };
