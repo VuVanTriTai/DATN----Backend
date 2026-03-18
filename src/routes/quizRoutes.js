@@ -30,4 +30,10 @@ router.delete("/:id", verifyToken, quizController.deleteQuiz);
 //GET /api/quiz/search?keyword=abc (Cần token)
 router.get("/search", verifyToken, quizController.searchQuizzes);
 
+
+
+router.post('/submit-lesson', verifyToken, quizController.submitLessonQuiz);
+
+
+
 module.exports = router;

@@ -1,17 +1,14 @@
 const Quiz = require("../models/Quiz");
 const Attempt = require("../models/Attempt");
-const OpenAI = require("openai");
+const Groq = require("groq-sdk"); // Thay đổi ở đây
 const paginate = require("../utils/paginate");
+const Lesson = require("../models/Lesson");
 
-const client = new OpenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
-});
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const generateQuiz = async (req, res) => {
   try {
-    const { title, topic, numQuestions, difficulty, questionType } =
-      req.body;
+    const { title, topic, numQuestions, difficulty, questionType } = req.body;
     const owner = req.user.id;
 
     // Tạo prompt cho AI
@@ -94,17 +91,20 @@ const generateQuiz = async (req, res) => {
 
 
     // Call API AI
-    const completion = await client.chat.completions.create({
-      model: "gemini-3-flash-preview",
-      messages: [{ role: "user", content: prompt }],
-      // temperature: 0.7,
+    // Gọi API Groq
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile", // Hoặc mixtral-8x7b-32768
+      messages: [
+        { role: "system", content: "Bạn là hệ thống tạo câu hỏi trắc nghiệm, luôn trả về JSON thuần túy." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.7,
+      response_format: { type: "json_object" }
     });
 
     const aiText = completion.choices[0].message.content;
-    const jsonMatch = aiText.match(/\{[\s\S]*\}/);
-    const questionsData = JSON.parse(jsonMatch[0]);
+    const questionsData = JSON.parse(aiText);
 
-    // Lưu trữ quiz vào database
     const newQuiz = new Quiz({
       title,
       numQuestions,
@@ -117,10 +117,8 @@ const generateQuiz = async (req, res) => {
 
     res.status(201).json({ success: true, quizId: newQuiz._id });
   } catch (error) {
-    console.error("Generate quiz error:", error);
-    res
-      .status(500)
-      .json({ success: false, message: "Lỗi khi tạo quiz bằng AI" });
+    console.error("Groq Generate quiz error:", error);
+    res.status(500).json({ success: false, message: "Lỗi khi tạo quiz bằng Groq" });
   }
 };
 
@@ -413,6 +411,56 @@ const searchQuizzes = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+const submitLessonQuiz = async (req, res) => {
+    try {
+        const { planId, dayNumber, answers } = req.body; // answers: {0: 1, 1: 0...}
+        const userId = req.user.id;
+
+        // 1. Tìm bài học để lấy bộ câu hỏi gốc
+        const lesson = await Lesson.findOne({ planId, dayNumber });
+        if (!lesson) return res.status(404).json({ success: false, message: "Không tìm thấy bài học" });
+
+        let score = 0;
+        const totalQuestions = lesson.quiz.length;
+        
+        // 2. Chấm điểm
+        const results = lesson.quiz.map((q, index) => {
+            const userAnswer = answers[index];
+            const isCorrect = Number(userAnswer) === q.correctAnswer;
+            if (isCorrect) score++;
+            return {
+                question: q.question,
+                isCorrect,
+                correctAnswer: q.correctAnswer,
+                userAnswer: userAnswer,
+                explanation: q.explanation
+            };
+        });
+
+        // 3. Cập nhật trạng thái bài học thành 'completed'
+        lesson.status = 'completed';
+        await lesson.save();
+
+        // 4. (Tùy chọn) Mở khóa bài học tiếp theo (Ngày n + 1)
+        await Lesson.findOneAndUpdate(
+            { planId, dayNumber: Number(dayNumber) + 1 },
+            { status: 'in-progress' }
+        );
+
+        res.status(200).json({
+            success: "true",
+            data: {
+        score: score,
+        totalQuestions: totalQuestions,
+        results: results, // Mảng chi tiết đúng sai
+        percentage: Math.round((score / totalQuestions) * 100)
+    }
+});
+
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
 
 module.exports = {
   generateQuiz,
@@ -424,4 +472,5 @@ module.exports = {
   startQuiz,
   deleteQuiz,
   searchQuizzes,
+  submitLessonQuiz,
 };
