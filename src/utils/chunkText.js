@@ -47,9 +47,9 @@ const applyOverlap = (chunks, overlapSize) => {
 const chunkText = (rawText) => {
     if (!rawText || typeof rawText !== 'string') return [];
 
-    const MAX_WORDS = 800; // Giới hạn tối đa 1 chunk
-    const MIN_WORDS = 500; // Cố gắng đạt tối thiểu để AI xử lý hiệu quả
-    const OVERLAP_SIZE = 100; // Số từ lặp lại giữa các đoạn
+    const MAX_WORDS = 350; // Giới hạn tối đa 1 chunk
+    //const MIN_WORDS = 500; // Cố gắng đạt tối thiểu để AI xử lý hiệu quả
+    const OVERLAP_SIZE = 50; // Số từ lặp lại giữa các đoạn
 
     // Bước 1: Chia theo đoạn văn bản để giữ nguyên ý nghĩa câu
     const paragraphs = rawText.split(/\n\s*\n/);
@@ -59,34 +59,19 @@ const chunkText = (rawText) => {
     let currentWordCount = 0;
 
     for (let para of paragraphs) {
-        para = para.trim();
-        if (!para) continue;
-
-        const paraWordCount = countWords(para);
-        const looksLikeHeader = isHeading(para);
-
-        // Bước 2: Logic ngắt đoạn thông minh
-        // Nếu gặp tiêu đề mới và đoạn hiện tại đã đủ lớn, hoặc nếu thêm đoạn này vào sẽ vượt quá MAX_WORDS
-        if ((looksLikeHeader && currentWordCount >= MIN_WORDS) || (currentWordCount + paraWordCount > MAX_WORDS)) {
-            if (currentBuffer.length > 0) {
-                chunks.push(currentBuffer.join('\n\n'));
-                currentBuffer = [];
-                currentWordCount = 0;
-            }
+        const words = para.trim().split(/\s+/).length;
+        if (currentWordCount + words > MAX_WORDS) {
+            chunks.push(currentBuffer.join('\n\n'));
+            currentBuffer = [para];
+            currentWordCount = words;
+        } else {
+            currentBuffer.push(para);
+            currentWordCount += words;
         }
-
-        currentBuffer.push(para);
-        currentWordCount += paraWordCount;
     }
-
-    // Đẩy nốt phần còn lại vào mảng
-    if (currentBuffer.length > 0) {
-        chunks.push(currentBuffer.join('\n\n'));
-    }
-
-    // Bước 3: Thêm ngữ cảnh lặp lại giữa các đoạn
-    return applyOverlap(chunks, OVERLAP_SIZE);
+    if (currentBuffer.length > 0) chunks.push(currentBuffer.join('\n\n'));
+    
+    return chunks.map((c, i) => ({ index: i, content: c, wordCount: c.split(/\s+/).length }));
 };
-
 // EXPORT DƯỚI DẠNG OBJECT (Để dùng const { chunkText } = require(...))
 module.exports = { chunkText };

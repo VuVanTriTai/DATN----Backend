@@ -1,5 +1,8 @@
 require('dns').setServers(['1.1.1.1', '8.8.8.8']);
 require("dotenv").config();
+console.log("--- Kiểm tra Token ---");
+console.log("HF_TOKEN có tồn tại không:", process.env.HF_TOKEN ? "CÓ ✅" : "KHÔNG ❌");
+console.log("----------------------");
 const app = require("./src/app");
 const mongoose = require("mongoose");
 
