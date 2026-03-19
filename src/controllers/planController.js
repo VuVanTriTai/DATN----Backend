@@ -1,7 +1,7 @@
 const Plan = require("../models/Plan");
 const Lesson = require("../models/Lesson");
 const Groq = require("groq-sdk");
-
+const courseService = require("../services/courseService"); // ĐÚNG // Import service RAG
 // Khởi tạo Groq
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -13,78 +13,78 @@ const createPlanFromText = async (req, res) => {
     const { title, extractedText, numDays } = req.body;
     const userId = req.user?.id || req.user?._id;
 
+
+
+ // --- BỔ SUNG GIỚI HẠN TẠI ĐÂY ---
+    const MAX_DAYS = 14; // Bạn có thể chỉnh thành 7 hoặc 10 tùy ý
+    const MIN_DAYS = 1;
+
+    // Ép kiểu về số nguyên
+    numDays = parseInt(numDays) || 7; 
+
+    if (numDays > MAX_DAYS) {
+        return res.status(400).json({ 
+            success: false, 
+            message: `Số ngày học quá dài. Vui lòng chọn tối đa ${MAX_DAYS} ngày.` 
+        });
+    }
+
+    if (numDays < MIN_DAYS) numDays = MIN_DAYS;
+    // -------------------------------
+
+
+
+
+
+
+
+
     if (!extractedText) return res.error("Văn bản đầu vào không được để trống", 400);
 
-    // 1. Tạo bản ghi Plan (Lưu thông tin tổng quan)
+    // BƯỚC 1: Tạo bản ghi Plan tổng quan
     const newPlan = await Plan.create({
       title: title || "Khóa học mới",
       owner: userId,
-      duration: numDays || 7
+      duration: numDays 
     });
 
-    // 2. Prompt yêu cầu AI chia nhỏ bài học
-    const prompt = `Bạn là chuyên gia giáo dục. Dựa trên nội dung: "${extractedText.substring(0, 4000)}", 
-    hãy chia thành lộ trình học ${numDays || 7} ngày.
+    // BƯỚC 2: CHUNKING & EMBEDDING (RAG starts here)
+    // Chia nhỏ text và lưu vector vào MongoDB Atlas dùng Gemini
+    console.log("--- Đang xử lý Chunking và Embedding... ---");
+    await courseService.processAndStoreDocument(newPlan._id, extractedText);
+
+    // BƯỚC 3: Tạo dàn ý (Outline) cho các ngày học
+    // AI chỉ cần tạo Tiêu đề cho từng ngày, chưa cần viết nội dung chi tiết ngay
+    console.log("--- Đang tạo dàn ý lộ trình... ---");
+    const { previewPlan } = await courseService.analyzeDocument(extractedText.substring(0, 5000));
+
+    // BƯỚC 4: Tạo nội dung chi tiết từng ngày bằng Vector Search
+    const lessonsToSave = [];
     
-    YÊU CẦU ĐỊNH DẠNG JSON BẮT BUỘC:
-    {
-      "lessons": [
-        {
-          "dayNumber": 1,
-          "title": "Tiêu đề bài học",
-          "content": "Nội dung bài học chi tiết",
-          "summary": "Tóm tắt ngắn",
-          "quiz": [
-            {
-              "question": "Câu hỏi?",
-              "options": ["A", "B", "C", "D"],
-              "correctAnswer": 0,
-              "explanation": "Giải thích"
-            }
-          ]
-        }
-      ]
-    }
-    Lưu ý: "quiz" luôn phải là một MẢNG (Array). Nếu không có câu hỏi hãy để []`;
-
-    // 3. Gọi Groq Llama 3.3
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: "system", content: "Bạn là chuyên gia tạo giáo án, luôn trả về JSON." },
-        { role: "user", content: prompt }
-      ],
-      model: "llama-3.3-70b-versatile", 
-      temperature: 0.2,
-      response_format: { type: "json_object" }
-    });
-
-    const aiData = JSON.parse(chatCompletion.choices[0].message.content);
-
-    // 4. Xử lý và làm sạch dữ liệu trước khi lưu vào DB (Fix lỗi validation quiz)
-    const lessonsToSave = aiData.lessons.map(lesson => {
-      // Đảm bảo quiz luôn là mảng để không lỗi Schema
-      let sanitizedQuiz = [];
-      if (Array.isArray(lesson.quiz)) {
-        sanitizedQuiz = lesson.quiz.filter(q => typeof q === 'object' && q.question);
-      }
-
-      return {
+    for (const item of previewPlan) {
+      console.log(`--- Đang viết nội dung RAG cho Ngày ${item.dayNumber}: ${item.title} ---`);
+      
+      // Hàm này sẽ dùng Vector Search để tìm nội dung liên quan nhất cho ngày này
+      const detail = await courseService.generateSingleLessonContent(newPlan._id, item);
+      
+      lessonsToSave.push({
         planId: newPlan._id,
-        dayNumber: lesson.dayNumber,
-        title: lesson.title,
-        content: lesson.content,
-        summary: lesson.summary,
-        quiz: sanitizedQuiz,
-        status: lesson.dayNumber === 1 ? 'in-progress' : 'locked'
-      };
-    });
+        dayNumber: item.dayNumber,
+        title: item.title,
+        content: detail.content,
+        summary: detail.summary,
+        quiz: detail.quiz || [],
+        status: item.dayNumber === 1 ? 'in-progress' : 'locked'
+      });
+    }
 
+    // BƯỚC 5: Lưu toàn bộ bài học vào Database
     await Lesson.insertMany(lessonsToSave);
 
-    return res.success({ _id: newPlan._id }, "Đã tạo lộ trình học tập thành công!");
+    return res.success({ _id: newPlan._id }, "Đã tạo lộ trình học tập RAG thành công!");
 
   } catch (error) {
-    console.error("LỖI HỆ THỐNG AI:", error.message);
+    console.error("LỖI HỆ THỐNG RAG:", error.message);
     return res.error("Lỗi khi tạo lộ trình: " + error.message, 500);
   }
 };

@@ -61,22 +61,23 @@ const finalizeCreateCourse = async (req, res) => {
         const { title, extractedText, numDays, difficulty, previewPlan } = req.body;
         const userId = req.user.id;
 
-        // 1. Tạo Plan trước
+        // 1. Tạo Plan (Course)
         const newPlan = await Plan.create({
-            title: title || "Khóa học mới",
+            title: title,
             owner: userId,
             duration: numDays,
-            level: difficulty || "Medium"
+            level: difficulty
         });
 
-        // 2. Vòng lặp: Tạo nội dung từng bài (Đảm bảo AI không bị "lười")
+        // 2. CHUNKING & EMBEDDING (Lưu vào Vector DB)
+        // Đây là bước quan trọng nhất để kích hoạt RAG
+        await courseService.processAndStoreDocument(newPlan._id, extractedText);
+
+        // 3. Tạo bài học bằng RAG (Vector Search từng bài)
         const lessonsToSave = [];
-        
         for (const item of previewPlan) {
-            console.log(`Đang tạo nội dung cho Ngày ${item.dayNumber}...`);
-            
-            // AI tập trung viết duy nhất 1 bài này
-            const detail = await courseService.generateSingleLessonContent(extractedText, item);
+            // Truyền newPlan._id để AI tìm đúng các chunks của khóa học này
+            const detail = await courseService.generateSingleLessonContent(newPlan._id, item);
             
             lessonsToSave.push({
                 planId: newPlan._id,
@@ -89,12 +90,9 @@ const finalizeCreateCourse = async (req, res) => {
             });
         }
 
-        // 3. Lưu toàn bộ vào DB
         await Lesson.insertMany(lessonsToSave);
-
-        return res.success({ _id: newPlan._id }, "Khóa học đã tạo xong với nội dung chi tiết từng ngày!");
+        return res.success({ _id: newPlan._id }, "Khóa học RAG đã khởi tạo thành công!");
     } catch (error) {
-        console.error("Lỗi:", error);
         return res.error(error.message, 500);
     }
 };

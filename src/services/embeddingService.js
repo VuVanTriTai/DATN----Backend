@@ -1,22 +1,31 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+// src/services/embeddingService.js
+const { pipeline } = require('@xenova/transformers');
+
+let extractor = null;
+
+const getExtractor = async () => {
+    if (!extractor) {
+        // Sử dụng model 'all-MiniLM-L6-v2' - cực nhẹ, chạy nhanh trên CPU
+        // Model này trả về vector 384 chiều
+        extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    }
+    return extractor;
+};
 
 const generateEmbedding = async (text) => {
     try {
-        // Nhắc nhở: Groq không có Embedding, nên vẫn phải dùng Gemini ở đây
-        if (!process.env.GEMINI_API_KEY) {
-            throw new Error("Thiếu GEMINI_API_KEY để tạo Vector.");
-        }
-
-        const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-        const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
-
-        const cleanText = text.replace(/\n/g, " ");
-        const result = await model.embedContent(cleanText);
+        const pipe = await getExtractor();
         
-        return result.embedding.values; 
+        // Tạo embedding
+        const output = await pipe(text, { pooling: 'mean', normalize: true });
+        
+        // Chuyển kết quả về dạng mảng số (Array of numbers)
+        const embedding = Array.from(output.data);
+        
+        return embedding; 
     } catch (error) {
-        console.error("Embedding Error:", error.message);
-        throw new Error("Lỗi tạo vector: " + error.message);
+        console.error("Local Embedding Error:", error.message);
+        throw new Error("Lỗi khi tạo embedding nội bộ: " + error.message);
     }
 };
 

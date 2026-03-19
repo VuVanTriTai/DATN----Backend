@@ -1,23 +1,14 @@
 const mongoose = require('mongoose');
 
 const chunkSchema = new mongoose.Schema({
-    courseId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Plan', // Giả sử Plan là Model khóa học của bạn
-        required: true
-    },
-    chunkIndex: { type: Number, required: true },
+    planId: { type: mongoose.Schema.Types.ObjectId, ref: 'Plan', index: true },
     content: { type: String, required: true },
-    embedding: {
-        type: [Number], // Mảng các số thực đại diện cho Vector
-        // // Mảng 1536 số thực cho model text-embedding-3-small
-        required: true
-    },
-    wordCount: { type: Number },
-    createdAt: { type: Date, default: Date.now }
+    embedding: { type: [Number], required: true },
+    chunkIndex: Number,
+    metadata: {
+        wordCount: Number // Lưu lại số từ để sau này debug hoặc tính token
+    }
 });
 
-// Đánh dấu index cho courseId để truy vấn nhanh hơn
-chunkSchema.index({ courseId: 1 });
-
+// Lưu ý: Bạn cần tạo Search Index trên MongoDB Atlas cho field 'embedding'
 module.exports = mongoose.model('Chunk', chunkSchema);
