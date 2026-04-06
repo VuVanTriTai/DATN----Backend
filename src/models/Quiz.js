@@ -1,3 +1,4 @@
+// models/Quiz.js
 const mongoose = require("mongoose");
 
 const Question = new mongoose.Schema(
@@ -42,8 +43,7 @@ const quizSchema = new mongoose.Schema(
 );
 
 quizSchema.index(
-  { title: "text", topic: "text" },
-  { weights: { title: 5, topic: 2 } }
-); // Tạo index cho trường title và topic để hỗ trợ tìm kiếm nhanh hơn
-
+  { title: "text" },
+  { weights: { title: 5 } }
+);
 module.exports = mongoose.model("Quiz", quizSchema);

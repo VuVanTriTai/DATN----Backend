@@ -1,77 +1,164 @@
+// utils/chunkText.js — TABLE-AWARE CHUNKER
+"use strict";
+
+const TARGET_CHUNK_WORDS = 280;
+const MIN_CHUNK_WORDS    = 60;
+const OVERLAP_LINES      = 3; // overlap giữa chunks
+
+// ─────────────────────────────────────────────
+// LINE CLASSIFICATION
+// ─────────────────────────────────────────────
+
 /**
- * Hàm đếm số lượng từ trong một văn bản (hỗ trợ tiếng Việt)
+ * Classify từng dòng text
  */
-const countWords = (str) => {
-    return str.trim().split(/\s+/).filter(word => word.length > 0).length;
+const classifyLine = (line) => {
+  if (!line.trim())                     return "blank";
+  if (/^\s*\|/.test(line))             return "table";     // Markdown table row
+  if (/^#{1,6}\s/.test(line.trim()))   return "heading";   // # Heading
+  if (/^[\s]*[-*+]\s/.test(line))      return "list";      // - Bullet point
+  return "text";
 };
 
 /**
- * Hàm kiểm tra xem một dòng có phải là tiêu đề hay không.
- * Giúp AI chia nhỏ bài học mà không làm đứt đoạn các chương/mục.
+ * Group liên tiếp các dòng cùng type thành blocks
+ * Table blocks KHÔNG bao giờ bị split
  */
-const isHeading = (line) => {
-    // Detect dạng: "Chương 1", "Phần I", "1.", "1.1", "1.1.1"
-    const headingRegex = /^(\d+(\.\d+)*|Chương\s+\d+|Chapter\s+\d+|Phần\s+[IVXLCDM]+|[IVXLCDM]+\.)/i;
-    // Detect dòng in hoa hoàn toàn (thường là tiêu đề)
-    const isUppercase = line.length > 4 && line === line.toUpperCase();
-    return headingRegex.test(line.trim()) || isUppercase;
-};
+const groupIntoBlocks = (lines) => {
+  const blocks = [];
+  let current  = null;
 
-/**
- * Hàm tạo dữ liệu "gối đầu" (Overlap).
- * Lấy một phần cuối của chunk trước dán vào đầu chunk sau để giữ ngữ cảnh cho AI.
- */
-const applyOverlap = (chunks, overlapSize) => {
-    return chunks.map((content, index) => {
-        let finalContent = content;
+  for (const line of lines) {
+    const type = classifyLine(line);
 
-        if (index > 0) {
-            const prevChunkContent = chunks[index - 1];
-            const prevWords = prevChunkContent.split(/\s+/);
-            // Lấy 100 từ cuối của chunk trước
-            const overlapText = prevWords.slice(-overlapSize).join(' ');
-            finalContent = `[...Tiếp nối nội dung trước: ${overlapText}] \n\n ${content}`;
-        }
-
-        return {
-            index: index,
-            content: finalContent,
-            wordCount: countWords(finalContent)
-        };
-    });
-};
-
-/**
- * HÀM CHÍNH: Chia nhỏ văn bản thô
- */
-const chunkText = (rawText) => {
-    if (!rawText || typeof rawText !== 'string') return [];
-
-    const MAX_WORDS = 350; // Giới hạn tối đa 1 chunk
-    //const MIN_WORDS = 500; // Cố gắng đạt tối thiểu để AI xử lý hiệu quả
-    const OVERLAP_SIZE = 50; // Số từ lặp lại giữa các đoạn
-
-    // Bước 1: Chia theo đoạn văn bản để giữ nguyên ý nghĩa câu
-    const paragraphs = rawText.split(/\n\s*\n/);
-    
-    let chunks = [];
-    let currentBuffer = [];
-    let currentWordCount = 0;
-
-    for (let para of paragraphs) {
-        const words = para.trim().split(/\s+/).length;
-        if (currentWordCount + words > MAX_WORDS) {
-            chunks.push(currentBuffer.join('\n\n'));
-            currentBuffer = [para];
-            currentWordCount = words;
-        } else {
-            currentBuffer.push(para);
-            currentWordCount += words;
-        }
+    if (type === "blank") {
+      if (current) {
+        blocks.push(current);
+        current = null;
+      }
+      continue;
     }
-    if (currentBuffer.length > 0) chunks.push(currentBuffer.join('\n\n'));
-    
-    return chunks.map((c, i) => ({ index: i, content: c, wordCount: c.split(/\s+/).length }));
+
+    // Heading luôn tạo block riêng
+    if (type === "heading") {
+      if (current) blocks.push(current);
+      current = { type: "heading", lines: [line] };
+      blocks.push(current);
+      current = null;
+      continue;
+    }
+
+    // Type thay đổi → flush block cũ
+    if (current && current.type !== type) {
+      blocks.push(current);
+      current = null;
+    }
+
+    if (!current) current = { type, lines: [] };
+    current.lines.push(line);
+  }
+
+  if (current) blocks.push(current);
+  return blocks;
 };
-// EXPORT DƯỚI DẠNG OBJECT (Để dùng const { chunkText } = require(...))
+
+// ─────────────────────────────────────────────
+// MAIN CHUNKER
+// ─────────────────────────────────────────────
+
+/**
+ * Chunk text với bảo đảm:
+ * 1. Table blocks KHÔNG bị cắt giữa chừng
+ * 2. Mỗi chunk ~TARGET_CHUNK_WORDS
+ * 3. Overlap để maintain context cho RAG
+ */
+const chunkText = (text) => {
+  if (!text || typeof text !== "string") return [];
+
+  const lines  = text.split("\n");
+  const blocks = groupIntoBlocks(lines);
+  const chunks = [];
+
+  let currentLines = [];
+  let currentWords = 0;
+  let chunkIndex   = 0;
+
+  const flush = () => {
+    const content = currentLines.join("\n").trim();
+    const wc      = content.split(/\s+/).filter(Boolean).length;
+    
+    if (wc >= MIN_CHUNK_WORDS) {
+      chunks.push({ 
+        index: chunkIndex++, 
+        content, 
+        wordCount: wc 
+      });
+    }
+
+    // Overlap: giữ lại OVERLAP_LINES dòng cuối
+    const overlapLines = currentLines.slice(-OVERLAP_LINES);
+    currentLines = overlapLines;
+    currentWords = overlapLines.join(" ").split(/\s+/).filter(Boolean).length;
+  };
+
+  for (const block of blocks) {
+    const blockText  = block.lines.join("\n");
+    const blockWords = blockText.split(/\s+/).filter(Boolean).length;
+
+    // ── TABLE BLOCK: Không bao giờ split ──
+    if (block.type === "table") {
+      // Nếu table + content hiện tại quá lớn → flush trước
+      if (
+        currentWords + blockWords > TARGET_CHUNK_WORDS * 1.5 && 
+        currentWords > MIN_CHUNK_WORDS
+      ) {
+        flush();
+      }
+
+      // Add whole table
+      currentLines.push(...block.lines);
+      currentWords += blockWords;
+
+      // Bảng lớn → flush ngay
+      if (blockWords > TARGET_CHUNK_WORDS * 0.8) {
+        flush();
+      }
+      continue;
+    }
+
+    // ── TEXT/LIST/HEADING: Add từng dòng ──
+    for (const line of block.lines) {
+      const lineWords = line.split(/\s+/).filter(Boolean).length;
+
+      // Kiểm tra có cần flush không
+      if (
+        currentWords + lineWords > TARGET_CHUNK_WORDS &&
+        currentWords >= MIN_CHUNK_WORDS
+      ) {
+        flush();
+      }
+
+      currentLines.push(line);
+      currentWords += lineWords;
+    }
+  }
+
+  // Flush chunk cuối
+  if (currentWords >= MIN_CHUNK_WORDS) {
+    const content = currentLines.join("\n").trim();
+    const wc      = content.split(/\s+/).filter(Boolean).length;
+    
+    if (wc >= MIN_CHUNK_WORDS) {
+      chunks.push({ 
+        index: chunkIndex++, 
+        content, 
+        wordCount: wc 
+      });
+    }
+  }
+
+  console.log(`[chunkText] Created ${chunks.length} chunks from ${lines.length} lines`);
+  return chunks;
+};
+
 module.exports = { chunkText };

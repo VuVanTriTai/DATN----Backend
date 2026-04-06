@@ -1,46 +1,42 @@
-// Import cả 2 service: 1 cái để search, 1 cái để RAG (trả lời)
-const { searchSimilarChunks } = require('../services/vectorSearchService');
-const { answerQuestionWithRAG } = require('../services/ragService');
+const ragService = require('../services/ragService');
+const { searchRelevantChunks } = require('../services/vectorSearchService');
+const { generateEmbedding } = require('../services/embeddingService');
 
 /**
- * API: Tìm kiếm các đoạn văn bản liên quan (Dùng cho tab Tài liệu)
- * POST /api/ai/search
+ * Tìm kiếm đoạn văn bản liên quan (Dùng cho tab Tài liệu)
  */
 const searchRelevantContent = async (req, res) => {
     try {
-        const { question, courseId } = req.body;
-        if (!question || !courseId) return res.error("Thiếu câu hỏi hoặc ID khóa học", 400);
+        const { question, planId } = req.body;
+        if (!question || !planId) return res.error("Thiếu thông tin truy vấn", 400);
 
-        const relevantChunks = await searchSimilarChunks(question, courseId);
-        
-        return res.success({
-            question,
-            relevantChunks
-        }, "Đã tìm thấy các dữ liệu liên quan.");
+        // Tạo vector cho câu hỏi và tìm trong DB
+        const queryVector = await generateEmbedding(question, "query");
+        const relevantChunks = await searchRelevantChunks(planId, queryVector, 5);
+
+        return res.success(relevantChunks);
     } catch (error) {
         return res.error(error.message, 500);
     }
 };
 
 /**
- * API: Chat thông minh dựa trên tài liệu (Dùng cho tab Phòng chat - RAG)
- * POST /api/ai/chat-doc
+ * Chat thông minh (RAG)
  */
 const chatWithDocument = async (req, res) => {
     try {
-        const { question, courseId } = req.body;
-        if (!question || !courseId) return res.error("Vui lòng cung cấp câu hỏi và ID khóa học", 400);
+        const { question, planId } = req.body;
+        if (!question || !planId) return res.error("Vui lòng cung cấp câu hỏi và ID lộ trình", 400);
 
-        // Đây là hàm gọi sang ragService mà tôi đã viết ở tin nhắn trước
-        const result = await answerQuestionWithRAG(question, courseId);
-
-        return res.success(result, "AI đã phản hồi thành công.");
+        const result = await ragService.answerQuestionWithRAG(question, planId);
+        return res.success(result);
     } catch (error) {
-        return res.error(error.message, 500);
+        console.error("AI Chat Error:", error.message);
+        return res.error("AI hiện không thể trả lời, vui lòng thử lại sau.", 500);
     }
 };
 
-// Xuất cả 2 hàm để Route sử dụng
+// QUAN TRỌNG: Phải export đúng tên để Route nhận diện được
 module.exports = { 
     searchRelevantContent, 
     chatWithDocument 

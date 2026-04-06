@@ -1,46 +1,100 @@
-const Chunk = require('../models/Chunk');
+const mongoose = require("mongoose");
+const Chunk = require("../models/Chunk");
+const axios = require("axios");
 
+/**
+ * 🔍 VECTOR SEARCH CHÍNH XÁC
+ */
 const searchRelevantChunks = async (planId, queryEmbedding, limit = 5) => {
-    const results = await Chunk.aggregate([
+  try {
+    const oid = new mongoose.Types.ObjectId(planId);
+
+    // 1. Kiểm tra dữ liệu thực tế
+    const count = await Chunk.countDocuments({ planId: oid });
+    console.log(`📊 Kiểm tra DB: Plan ${planId} có ${count} chunks.`);
+
+    // 2. Thực hiện Vector Search
+    let results = await Chunk.aggregate([
       {
-        "$vectorSearch": {
-          "index": "vector_index",
-          "path": "embedding",
-          "queryVector": queryEmbedding,
-          "numCandidates": 100,
-          "limit": limit,
-          "filter": { "planId": planId } // Lọc chính xác tài liệu của khóa học này
-        }
-      }
-    ]);
-    
-    // Nếu kết quả rỗng, trả về thông báo để LLM không bịa nội dung
-    if (results.length === 0) return "Không tìm thấy dữ liệu liên quan.";
-    
-    return results.map(r => r.content).join("\n\n");
-};
-const reRank = async (query, documents) => {
-    // Gọi mô hình Cross-Encoder (ms-marco-MiniLM-L6-v2 như trong báo cáo)
-    const response = await axios.post(
-        "https://api-inference.huggingface.co/models/cross-encoder/ms-marco-MiniLM-L6-v2",
-        { 
-            inputs: documents.map(doc => ({ source_sentence: query, sentences: [doc] })) 
+        $vectorSearch: {
+          index: "vector_index",
+          path: "embedding",
+          queryVector: queryEmbedding,
+          numCandidates: 100,
+          limit: limit * 2, // Lấy dư ra để lọc trùng
+          filter: { planId: oid },
         },
-        { headers: { Authorization: `Bearer ${process.env.HF_TOKEN}` } }
+      },
+      {
+        $project: {
+          content: 1,
+          score: { $meta: "vectorSearchScore" },
+        },
+      },
+    ]);
+
+    // 3. Xử lý sau khi có kết quả (Tránh lỗi Initialization)
+    if (!results || results.length === 0) {
+      console.warn("⚠️ Vector search rỗng → fallback lấy chunk đầu tiên");
+      results = await Chunk.find({ planId: oid }).limit(limit).lean();
+    }
+
+    // Lọc trùng nội dung (Dùng Set)
+    const seen = new Set();
+    const uniqueResults = [];
+    for (const r of results) {
+      if (!seen.has(r.content)) {
+        seen.add(r.content);
+        uniqueResults.push(r);
+      }
+    }
+
+    // Cắt ngắn và format kết quả
+    const cleaned = uniqueResults.slice(0, limit).map((r) => ({
+      content: r.content.substring(0, 1000), 
+      score: r.score || 0.5,
+    }));
+
+    console.log(`✅ Tìm thấy ${cleaned.length} đoạn văn bản liên quan.`);
+    return cleaned;
+  } catch (error) {
+    console.error("❌ Vector Search Error:", error.message);
+    return [];
+  }
+};
+
+/**
+ * 🚀 RE-RANKER (Sử dụng Cross-Encoder theo tài liệu của bạn)
+ */
+const reRank = async (query, documents) => {
+  try {
+    if (!documents?.length || !process.env.HF_TOKEN) return documents;
+
+    const response = await axios.post(
+      "https://router.huggingface.co/models/cross-encoder/ms-marco-MiniLM-L6-v2",
+      {
+        inputs: documents.map((doc) => ({
+          source_sentence: query,
+          sentences: [doc.content],
+        })),
+      },
+      {
+        headers: { Authorization: `Bearer ${process.env.HF_TOKEN}` },
+        timeout: 10000,
+      }
     );
-    // Trả về văn bản đã được sắp xếp lại theo điểm số cao nhất
-    return response.data; 
+
+    const scores = response.data;
+    const ranked = documents.map((doc, i) => ({
+      ...doc,
+      reRankScore: scores[i] ?? 0,
+    }));
+
+    return ranked.sort((a, b) => b.reRankScore - a.reRankScore);
+  } catch (err) {
+    console.error("⚠️ Re-rank fail, dùng kết quả gốc:", err.message);
+    return documents;
+  }
 };
 
-const searchWithReRank = async (planId, query, queryEmbedding) => {
-    // 1. Lấy Top 10 từ Vector DB (Retrieval)
-    const topK = await searchFromVectorDB(planId, queryEmbedding, 10);
-    
-    // 2. Re-ranking (Xếp hạng lại như Hình 2 bước 7)
-    const rankedDocs = await reRank(query, topK);
-    
-    // 3. Lấy Top 3 cuối cùng (Hình 2 bước 8)
-    return rankedDocs.slice(0, 3).join("\n\n");
-};
-
-module.exports = { searchRelevantChunks, searchWithReRank };
+module.exports = { searchRelevantChunks, reRank };

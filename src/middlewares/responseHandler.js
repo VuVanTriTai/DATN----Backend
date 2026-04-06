@@ -1,20 +1,21 @@
 const responseHandler = (req, res, next) => {
-  res.success = (data, message = "Success") => {
-    return res.status(200).json({
-      success: "true",
-      message,
-      data,
-    });
-  };
+  // Hàm gửi phản hồi thành công
+    res.success = function (data, message = "Success", statusCode = 200) {
+        return res.status(statusCode).json({
+            success: true,
+            message,
+            data,
+        });
+    };
+   // Hàm gửi phản hồi lỗi (Dùng để trả về JSON thay vì [object Object])
+    res.error = function (message = "Internal Server Error", statusCode = 500) {
+        return res.status(statusCode).json({
+            success: false,
+            message: typeof message === 'object' ? (message.message || "Lỗi không xác định") : message,
+        });
+    };
 
-  res.error = (message = "Internal Server Error", status = 500) => {
-    return res.status(status).json({
-      success: "false",
-      message,
-      data: null,
-    });
-  };
-  next();
+    next();
 };
 
 module.exports = responseHandler;

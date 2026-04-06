@@ -1,0 +1,179 @@
+const Groq = require("groq-sdk");
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const { generateEmbedding } = require("./embeddingService");
+const { searchRelevantChunks } = require("./vectorSearchService");
+const Chunk = require("../models/Chunk");
+const { chunkText } = require("../utils/chunkText");
+const { cleanText } = require("../utils/cleanText");
+const { getLearningMode } = require("./userContextService");
+
+
+
+
+
+/**
+ * BỘ GIẢI MÃ JSON SIÊU CẤP: Gỡ bỏ dấu ```json ... ``` nếu AI trả về nhầm
+ */
+const safeJSONParse = (text) => {
+    try {
+        const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
+        return JSON.parse(cleaned);
+    } catch (e) {
+        console.error("❌ Lỗi Parse JSON, AI trả về sai format:", text.substring(0, 100));
+        throw new Error("Dữ liệu AI không hợp lệ.");
+    }
+};
+
+
+
+/**
+ * GIAI ĐOẠN 1: AI thiết kế Syllabus (Dàn ý khoa học)
+ */
+const generateSyllabus = async (rawText, numDays) => {
+    const syllabusPrompt = `Bạn là Chuyên gia Sư phạm. 
+    NHIỆM VỤ: Dựa trên tài liệu, hãy thiết kế lộ trình học ${numDays} ngày.
+    YÊU CẦU:
+    - Trả về JSON có key là "title" và "syllabus".
+    - Trong "syllabus", mỗi phần tử PHẢI có key là "dayNumber" và "title". (Sửa topic thành title để khớp với frontend cũ)
+    
+    JSON MẪU: {"title": "Tên khóa học", "syllabus": [{"dayNumber": 1, "title": "Giới thiệu"}]}`;
+
+    const res = await groq.chat.completions.create({
+        messages: [{ role: "user", content: syllabusPrompt + "\n\nTEXT: " + rawText.substring(0, 10000) }],
+        model: "llama-3.1-8b-instant",
+        response_format: { type: "json_object" }
+    });
+// Parse và chuẩn hóa dữ liệu trước khi trả về
+    const data = JSON.parse(res.choices[0].message.content);
+    
+    // Đảm bảo cấu trúc trả về luôn thống nhất
+    return {
+        title: data.title || "Khóa học AI",
+        syllabus: data.syllabus.map(item => ({
+            dayNumber: item.dayNumber || item.day,
+            title: item.title || item.topic // Chấp nhận cả 2 để không bị trống
+        }))
+    };
+};
+
+/**
+ * GIAI ĐOẠN 2: Chunking & Embedding (Quy tắc 350 từ của tài liệu RAG)
+ */
+const processAndStoreDocument = async (planId, text) => {
+    const cleaned = cleanText(text);
+    const chunks = chunkText(cleaned); // Đảm bảo chunkText.js dùng MAX_WORDS = 350
+    
+    const docs = [];
+    for (const c of chunks) {
+        // Sử dụng type="passage" cho việc lưu trữ
+        const embedding = await generateEmbedding(c.content, "passage");
+        docs.push({
+            planId,
+            content: c.content,
+            embedding,
+            chunkIndex: c.index,
+            metadata: { wordCount: c.wordCount }
+        });
+    }
+    await Chunk.insertMany(docs);
+};
+
+/**
+ * GIAI ĐOẠY 3: Viết bài giảng & Quiz chuẩn khoa học (RAG)
+ */
+const generateScientificLesson = async (planId, item, userId = null) => {
+    try {
+        // 1. Tìm context liên quan nhất (Dùng prefix 'query:' cho E5-Large)
+        const queryText = `query: ${item.topic} ${item.objective || ""}`;
+        const queryVector = await generateEmbedding(queryText, "query");
+        const contextChunks = await searchRelevantChunks(planId, queryVector, 6);
+        const context = contextChunks.length > 0 
+            ? contextChunks.map(c => c.content).join("\n---\n") 
+            : "Không tìm thấy dữ liệu bổ trợ cụ thể trong tài liệu.";
+
+        // 2. Lấy chế độ học tập (Cá nhân hóa)
+        const mode = userId ? await getLearningMode(userId, item.topic) : "NORMAL";
+
+        // 3. Prompt kết hợp đầy đủ yêu cầu của bạn
+        const prompt = `Bạn là GIÁO SƯ ĐẠI HỌC chuyên viết giáo án khoa học.
+        Hãy viết bài giảng cho chủ đề: "${item.topic}".
+        Dựa trên NGỮ CẢNH tài liệu sau:
+        ---
+        ${context}
+        ---
+        
+        YÊU CẦU NGHIÊM NGẶT:
+        - Mode: ${mode} (Nếu ADVANCED: viết chuyên sâu, phân tích kỹ thuật; Nếu SUMMARY: viết súc tích).
+        - TRƯỜNG "content": Chỉ chứa bài giảng (Markdown). KHÔNG viết Quiz hay Summary vào đây.
+        - TRƯỜNG "importantNotes": Mảng chứa các định nghĩa, công thức hoặc lưu ý then chốt trích từ tài liệu.
+        - TRƯỜNG "quiz": Tạo 3 câu hỏi trắc nghiệm đa lựa chọn (4 options) bám sát tài liệu.
+
+        BẮT BUỘC TRẢ VỀ JSON:
+        {
+          "content": "Nội dung bài học chi tiết...",
+          "importantNotes": ["Lưu ý 1", "Công thức 2"], 
+          "summary": "Tóm tắt bài học...",
+          "quiz": [
+            {
+              "question": "...", 
+              "options": ["A", "B", "C", "D"], 
+              "correctAnswer": 0, 
+              "level": "Nhận biết",
+              "explanation": "..."
+            }
+          ]
+        }`;
+
+        const res = await groq.chat.completions.create({
+            messages: [
+                { role: "system", content: "Bạn là máy xuất bản giáo án JSON chuyên nghiệp." },
+                { role: "user", content: prompt }
+            ],
+            model: "llama-3.1-8b-instant",
+            temperature: 0.1,
+            max_tokens: 3000, // Đảm bảo không bị ngắt quãng giữa chừng
+            response_format: { type: "json_object" }
+        });
+
+        return JSON.parse(res.choices[0].message.content);
+    } catch (error) {
+        console.error("Lỗi AI Lesson:", error.message);
+        throw error;
+    }
+};
+const analyzeDocument = async (text) => {
+    const wordCount = text.split(/\s+/).length;
+
+    const prompt = `Bạn là chuyên gia phân tích tài liệu. Tài liệu này dài ${wordCount} từ. 
+    Hãy đề xuất thông số khóa học phù hợp.
+    Trả về JSON: {
+        "suggestedTitle": "...",
+        "difficulty": "Medium",
+        "suggestedDays": 7,
+        "summary": "..."
+    }`;
+
+    const res = await groq.chat.completions.create({
+        messages: [{ role: "user", content: prompt + "\n\nTEXT: " + text.substring(0, 5000) }],
+        model: "llama-3.1-8b-instant",
+        response_format: { type: "json_object" }
+    });
+
+    const analysis = JSON.parse(res.choices[0].message.content);
+
+    // Gọi Syllabus để lấy danh sách tiêu đề xem trước
+    const preview = await generateSyllabus(text, analysis.suggestedDays);
+
+    return {
+        analysis,
+        previewPlan: preview.syllabus
+    };
+};
+
+module.exports = {
+    generateSyllabus,
+    processAndStoreDocument,
+    analyzeDocument,
+
+    generateScientificLesson
+};

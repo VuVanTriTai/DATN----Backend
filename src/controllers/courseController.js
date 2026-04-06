@@ -1,159 +1,202 @@
-const { extractTextFromFile } = require('../utils/extractText');
-const courseService = require('../services/courseService'); // Sửa lại path cho đúng
+// controllers/courseController.js
+const planService = require('../services/planService');
+console.log("🔥 planService keys:", Object.keys(planService));
 const Plan = require('../models/Plan');
 const Lesson = require('../models/Lesson');
 
-/**
- * BƯỚC 1: Upload và Phân tích sơ bộ (Hiện trang Review)
- */
-// controllers/courseController.js
-
-// Hàm tạo độ trễ để tránh lỗi Rate Limit (429) của Groq
+// delay tránh rate limit
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+//const safeQuiz = Array.isArray(detail.quiz) ? detail.quiz : [];
+const { updateUserMemory } = require("../services/userContextService");
 
+
+/**
+ * 
+ * BƯỚC 1: Analyze (Review screen)
+ */
 const processAndAnalyze = async (req, res) => {
     try {
-        // Lấy text từ body (vì Frontend gửi { text: ... })
-        const { text } = req.body; 
+        const { text, learningGoals: rawGoals } = req.body;
 
         if (!text) {
-            return res.status(400).json({ 
-                success: "false", 
-                message: "Không nhận được văn bản để phân tích." 
+            return res.status(400).json({
+                success: false,
+                message: "Không có văn bản"
             });
         }
 
-        // Gọi service AI để phân tích văn bản thô
-        // (Lưu ý: Truyền thẳng 'text' vào hàm analyzeDocument)
-        const result = await courseService.analyzeDocument(text);
+        const result = await planService.analyzeDocument(text, rawGoals || {});
 
         return res.success({
-            rawText: text, // Gửi lại text để Frontend lưu vào state
+            rawText: text,
             analysis: result.analysis,
             previewPlan: result.previewPlan
-        }, "Phân tích tài liệu thành công.");
+        });
 
     } catch (error) {
-        console.error("Lỗi Controller Analyze:", error);
+        console.error("❌ Analyze Error:", error.message);
         return res.error(error.message, 500);
     }
 };
 
+
 /**
- * BƯỚC 2: Chia lại lộ trình khi User đổi số ngày (Instant Refresh)
+ * BƯỚC 2: Regenerate preview (đổi số ngày)
  */
 const regeneratePreview = async (req, res) => {
     try {
         const { rawText, days } = req.body;
-        if (!rawText || !days) return res.error("Thiếu văn bản hoặc số ngày", 400);
 
-        // Gọi AI chia lại tiêu đề (rất nhanh vì không tạo nội dung chi tiết)
-        const newPlan = await courseService.generatePreviewPlan(rawText, days);
-        
-        return res.success(newPlan, "Đã cập nhật lộ trình xem trước.");
+        if (!rawText || !days) {
+            return res.error("Thiếu dữ liệu", 400);
+        }
+
+        const newPlan = await planService.generatePreviewPlan(rawText, days);
+
+        return res.success(newPlan);
+
     } catch (error) {
         return res.error(error.message, 500);
     }
 };
 
+
 /**
- * BƯỚC 3: Xác nhận tạo khóa học thật sự vào Database
+ * BƯỚC 3: Tạo khóa học thật (RAG FULL)
  */
-
-const generatePreviewPlan = async (text, days) => {
-    const promptPreview = `Dựa trên nội dung: "${text.substring(0, 5000)}", hãy chia lại lộ trình thành ĐÚNG ${days} ngày.
-    Chỉ trả về JSON: {"plan": [{"dayNumber": 1, "title": "..."}, ...]}`;
-
-    const resPreview = await groq.chat.completions.create({
-        messages: [{ role: "user", content: promptPreview }],
-        model: "llama-3.3-70b-versatile",
-        response_format: { type: "json_object" }
-    });
-
-    return JSON.parse(resPreview.choices[0].message.content).plan;
-};
 const finalizeCreateCourse = async (req, res) => {
     try {
         const { title, extractedText, numDays } = req.body;
-        const userId = req.user.id;
+        const userId = req.user?.id || req.user?._id;
 
-        if (!extractedText) return res.error("Không có nội dung văn bản để xử lý", 400);
+        if (!extractedText) {
+            return res.error("Thiếu nội dung", 400);
+        }
 
-        console.log("--- BẮT ĐẦU QUY TRÌNH TẠO KHÓA HỌC TỰ ĐỘNG ---");
+        console.log("🚀 START AUTO COURSE");
 
-        // BƯỚC 1: Khởi tạo Plan nháp
-        const newPlan = await Plan.create({
+        // 1. Tạo plan
+        const plan = await Plan.create({
             title: title || "Đang xử lý...",
             owner: userId,
             duration: numDays
         });
 
-        // BƯỚC 2: Chunking & Embedding (Lưu vào Vector DB - 1024 dim)
-        // Bước này chạy Local nên rất nhanh và không tốn Token AI
-        console.log("1. Đang xử lý Embedding...");
-        await courseService.processAndStoreDocument(newPlan._id, extractedText);
+        // 2. Chunk + embedding
+        console.log("📦 Embedding...");
+        await planService.processAndStoreDocument(plan._id, extractedText);
 
-        // BƯỚC 3: AI Thiết kế Syllabus (Dàn ý khoa học)
-        console.log("2. AI đang thiết kế giáo trình...");
-        const syllabusData = await courseService.generateSyllabus(extractedText, numDays);
-        
-        // Cập nhật lại tiêu đề thật mà AI đề xuất
-        newPlan.title = syllabusData.title;
-        await newPlan.save();
+        // 3. Generate syllabus (outline chuẩn)
+        console.log("🧠 Generate syllabus...");
+        const syllabusData = await planService.generateSyllabus(extractedText, numDays);
 
-        // BƯỚC 4: Vòng lặp tạo nội dung chi tiết cho từng ngày (RAG)
-        console.log(`3. Bắt đầu tạo chi tiết ${numDays} bài học...`);
-        
+        plan.title = syllabusData.title;
+        await plan.save();
+
+        // 4. Generate lessons (RAG)
+        console.log("📚 Generate lessons...");
+
         for (const item of syllabusData.syllabus) {
-            console.log(`> Đang tạo bài Ngày ${item.day}: ${item.topic}`);
-            
-            try {
-                // Gọi AI tạo nội dung & Quiz dựa trên Context (RAG)
-                const detail = await courseService.generateScientificLesson(newPlan._id, item);
-                
-                // Lưu từng bài học vào DB ngay lập tức để tránh mất dữ liệu nếu lỗi giữa chừng
-                await Lesson.create({
-                    planId: newPlan._id,
-                    dayNumber: item.day,
-                    title: item.topic,
-                    content: detail.content,
-                    summary: detail.summary,
-                    quiz: detail.quiz || [],
-                    status: item.day === 1 ? 'in-progress' : 'locked'
-                });
+            console.log(`➡️ Day ${item.day}: ${item.topic}`);
 
-                // NGHỈ ĐỂ TRÁNH RATE LIMIT (Gói miễn phí cần nghỉ khoảng 10-15 giây)
-                if (item.day < syllabusData.syllabus.length) {
-                    console.log(`   - Hoàn tất bài ${item.day}. Nghỉ 12 giây để hồi Token...`);
-                    await sleep(12000); 
-                }
+    try {
+        const detail = await planService.generateLesson(plan._id, {
+        topic: item.topic,
+        day: item.day,
+        objective: item.objective || ""
+        }, userId);
+    const safeQuiz = Array.isArray(detail.quiz) ? detail.quiz : [];
 
-            } catch (lessonError) {
-                console.error(`❌ Lỗi tại bài ${item.day}:`, lessonError.message);
-                // Tạo bài học lỗi làm dự phòng (Fallback)
-                await Lesson.create({
-                    planId: newPlan._id,
-                    dayNumber: item.day,
-                    title: item.topic,
-                    content: "Nội dung bài học này gặp sự cố khi tạo tự động. Bạn có thể nhấn nút 'Tạo lại' trong trang biên tập.",
-                    summary: "Lỗi AI",
-                    quiz: [],
-                    status: 'locked'
-                });
-            }
+        await Lesson.create({
+            planId: plan._id,
+            dayNumber: item.day,
+            title: item.topic,
+            content: detail.content || "",
+            summary: detail.summary || "",
+            quiz: safeQuiz,
+            status: item.day === 1 ? 'in-progress' : 'locked'
+        });
+
+        // 🔥 CHÈN NGAY ĐÂY
+        if (detail.content && detail.content.length > 50) {
+            await updateUserMemory(userId, item.topic);
         }
 
-        console.log("--- ✅ TẤT CẢ ĐÃ HOÀN TẤT ---");
-        return res.success({ _id: newPlan._id }, "Khóa học RAG đã được tạo thành công!");
+
+        if (item.day < syllabusData.syllabus.length) {
+            await sleep(10000);
+        }
+
+    } catch (err) {
+        console.error(`❌ Lesson ${item.day} failed:`, err.message);
+
+        await Lesson.create({
+            planId: plan._id,
+            dayNumber: item.day,
+            title: item.topic,
+            content: "Lỗi khi tạo nội dung. Có thể regenerate.",
+            summary: "AI error",
+            quiz: [],
+            status: 'locked'
+        });
+    }
+}
+
+        console.log("✅ DONE");
+
+        return res.success({
+            _id: plan._id
+        }, "Tạo khóa học thành công");
 
     } catch (error) {
-        console.error("🔥 LỖI TỔNG QUAN:", error);
+        console.error("🔥 FINAL ERROR:", error);
         return res.error(error.message, 500);
     }
 };
-module.exports = { 
-    generatePreviewPlan,
-    processAndAnalyze, 
+const getMyPlans = async (req, res) => {
+  try {
+    const plans = await Plan.find({ owner: req.user.id });
+    res.success(plans);
+  } catch (err) {
+    res.error(err.message);
+  }
+};
+const deletePlan = async (req, res) => {
+  try {
+    const planId = req.params.id;
+
+    const plan = await Plan.findOne({
+      _id: planId,
+      owner: req.user.id,
+      isDeleted: false
+    });
+
+    if (!plan) return res.error("Không tìm thấy plan", 404);
+
+    // soft delete plan
+    plan.isDeleted = true;
+    plan.deleteAt = new Date();
+    await plan.save();
+
+    // soft delete lessons
+    await Lesson.updateMany(
+      { planId },
+      { isDeleted: true, deleteAt: new Date() }
+    );
+
+    res.success(null, "Đã xóa (soft)");
+  } catch (err) {
+    res.error(err.message);
+  }
+};
+
+
+
+
+module.exports = {
+    processAndAnalyze,
     regeneratePreview,
-    finalizeCreateCourse 
+    finalizeCreateCourse,
+    getMyPlans,
+    deletePlan
 };

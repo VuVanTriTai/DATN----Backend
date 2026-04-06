@@ -1,3 +1,4 @@
+// controllers/attemptController.js
 const Attempt = require("../models/Attempt");
 const paginate = require("../utils/paginate");
 
@@ -6,44 +7,39 @@ const getUserAttempts = async (req, res) => {
     const attempts = await paginate(
       Attempt,
       { user: req.user.id, isDeleted: false },
-      { 
-        page: req.query.page, 
-        limit: req.query.limit, 
+      {
+        page: req.query.page,
+        limit: req.query.limit,
         select: "-isDeleted -deleteAt",
-      },
+      }
     );
 
-    if (!attempts || attempts.data.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Attempt không tìm thấy" });
+    if (!attempts.data.length) {
+      return res.error("Không tìm thấy attempt", 404);
     }
 
-    res.status(200).json(attempts);
+    return res.success(attempts);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    return res.error(error.message, 500);
   }
 };
 
 const getAttemptById = async (req, res) => {
   try {
-    const attempt = await Attempt.find({_id: req.params.id, isDeleted: false}).select("-isDeleted -deleteAt");
-    
-    if (!attempt) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Attempt không tìm thấy" });
-    }
+    const attempt = await Attempt.findOne({
+      _id: req.params.id,
+      isDeleted: false,
+    }).select("-isDeleted -deleteAt");
+
+    if (!attempt) return res.error("Không tìm thấy attempt", 404);
 
     if (attempt.user.toString() !== req.user.id) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Bạn không có quyền truy cập attempt này" });
+      return res.error("Không có quyền", 403);
     }
-    
-    res.status(200).json(attempt);
+
+    return res.success(attempt);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    return res.error(error.message, 500);
   }
 };
 

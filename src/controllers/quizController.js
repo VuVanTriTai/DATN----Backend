@@ -1,125 +1,128 @@
+// controllers/quizController.js
 const Quiz = require("../models/Quiz");
 const Attempt = require("../models/Attempt");
-const Groq = require("groq-sdk"); // Thay đổi ở đây
-const paginate = require("../utils/paginate");
+const Groq = require("groq-sdk");
 const Lesson = require("../models/Lesson");
+const Progress = require("../models/Progress");
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+
+/**
+ * TẠO QUIZ ĐỘC LẬP (Thường dành cho Instructor tạo cho lớp)
+ */
 const generateQuiz = async (req, res) => {
   try {
-    const { title, topic, numQuestions, difficulty, questionType } = req.body;
-    const owner = req.user.id;
+    const { title, topic, numQuestions, difficulty } = req.body;
+    
+    // Sử dụng Prompt chuyên sâu về sư phạm (4 mức độ tư duy)
+    const prompt = `Bạn là chuyên gia khảo thí. Hãy tạo bộ câu hỏi trắc nghiệm về: "${topic}".
+    YÊU CẦU:
+    - Số lượng: ${numQuestions} câu.
+    - Độ khó: ${difficulty}.
+    - Phân loại mức độ: Nhận biết, Thông hiểu, Vận dụng, Phân tích.
+    - Trả về JSON thuần túy, không giải thích.
 
-    // Tạo prompt cho AI
-    const prompt = `
-      Hệ thống phản hồi dưới dạng JSON thuần túy.
-      Không bao gồm markdown, không giải thích, không văn bản thừa.
+    CẤU TRÚC JSON:
+    {
+      "questions": [
+        {
+          "questionType": "singleChoice",
+          "text": "Nội dung câu hỏi",
+          "options": ["A", "B", "C", "D"],
+          "correctAnswer": 0,
+          "explanation": "Giải thích chi tiết",
+          "level": "Nhận biết"
+        }
+      ]
+    }`;
 
-      Nhiệm vụ:
-      Tạo ${numQuestions} câu hỏi trắc nghiệm theo chủ đề "${title}" có nội dung "${topic}" với độ khó "${difficulty}".
-      Ngôn ngữ: Tiếng Việt.
-
-      Loại câu hỏi: ${questionType}.
-
-      Các giá trị hợp lệ của questionType:
-
-      1. "multipleStatements":
-      - Câu hỏi phải chứa đúng 4 mệnh đề được đánh số 1., 2., 3., 4. (hãy thiết kế các mệnh đề đúng và sai xen kẽ), ví dụ:
-        "1. 1+1=2
-        2. 2+3=6
-        3. 3+3=9
-        4. 4+4=8"
-      - 4 mệnh đề phải nằm trong field "text".
-      - Các phương án trả lời phải là tổ hợp của các mệnh đề, ví dụ:
-        "1 và 3 đúng"
-        "1, 2 và 4 đúng"
-        "Chỉ 2 sai"
-        "Cả 4 mệnh đề đều đúng"
-      - Có đúng 4 options.
-      - Chỉ có 1 đáp án hoàn toàn chính xác.
-      - correctAnswer là số từ 0 đến 3.
-
-      2. "singleChoice":
-      - Câu hỏi bình thường.
-      - Có đúng 4 options.
-      - Chỉ có 1 đáp án đúng.
-      - correctAnswer là số từ 0 đến 3.
-
-      3. "multipleChoice":
-      - Có đúng 4 options.
-      - Có thể có nhiều đáp án đúng.
-      - correctAnswer là mảng số (ví dụ: [0,2]).
-
-      4. "mixed":
-      4. Nếu questionType là "mixed":
-      - Mỗi câu hỏi phải có field "questionType".
-      - Giá trị chỉ được là:
-        "singleChoice"
-        "multipleChoice"
-        "multipleStatements"
-      - Không được dùng "mixed" trong questionType của câu hỏi.
-
-      Cấu trúc JSON bắt buộc:
-
-      {
-        "questions": [
-          {
-            "questionType": "multipleStatements | singleChoice | multipleChoice",
-            "text": "Nội dung câu hỏi (nếu multipleStatements phải chứa 4 mệnh đề đánh số 1.,2.,3.,4.)",
-            "options": ["Đáp án A", "Đáp án B", "Đáp án C", "Đáp án D"],
-            "correctAnswer": 0,
-            "explanation": "Giải thích rõ vì sao đáp án đúng."
-          }
-        ]
-      }
-
-      Quy tắc bắt buộc:
-      - Text phải chứa đúng 4 mệnh đề.
-      - Mỗi mệnh đề phải bắt đầu bằng:
-        1.
-        2.
-        3.
-        4.
-      - Mỗi mệnh đề phải nằm trên một dòng riêng.
-      - Không được tạo ít hơn hoặc nhiều hơn 4 mệnh đề.
-      - Explanation phải nhất quán với correctAnswer.
-      - Không được tự mâu thuẫn logic toán học hoặc kiến thức cơ bản.
-      - Không thêm bất kỳ văn bản nào ngoài JSON.
-      - Không thêm ký tự thừa.
-    `;
-
-
-    // Call API AI
-    // Gọi API Groq
     const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile", // Hoặc mixtral-8x7b-32768
-      messages: [
-        { role: "system", content: "Bạn là hệ thống tạo câu hỏi trắc nghiệm, luôn trả về JSON thuần túy." },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.7,
-      response_format: { type: "json_object" }
+      model: "llama-3.1-8b-instant", // Ưu tiên bản 8b để tránh lỗi JSON
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      temperature: 0.2
     });
 
-    const aiText = completion.choices[0].message.content;
-    const questionsData = JSON.parse(aiText);
+    const questionsData = JSON.parse(completion.choices[0].message.content);
 
     const newQuiz = new Quiz({
       title,
       numQuestions,
       difficulty,
-      questionType,
-      owner,
+      owner: req.user.id,
       questions: questionsData.questions,
     });
     await newQuiz.save();
 
-    res.status(201).json({ success: true, quizId: newQuiz._id });
+    return res.success({ quizId: newQuiz._id }, "Tạo bộ câu hỏi thành công.");
   } catch (error) {
-    console.error("Groq Generate quiz error:", error);
-    res.status(500).json({ success: false, message: "Lỗi khi tạo quiz bằng Groq" });
+    return res.error("Lỗi khi tạo quiz bằng AI", 500);
   }
+};
+
+/**
+ * CHẤM ĐIỂM QUIZ TRONG BÀI HỌC RAG (Cập nhật tiến độ học viên)
+ */
+// src/controllers/quizController.js
+
+// src/controllers/quizController.js - Hàm submitLessonQuiz
+
+const submitLessonQuiz = async (req, res) => {
+    try {
+        const { planId, dayNumber, answers } = req.body;
+        const userId = req.user.id;
+
+        const lesson = await Lesson.findOne({ planId, dayNumber });
+        if (!lesson) return res.error("Không tìm thấy bài học", 404);
+
+        const total = lesson.quiz ? lesson.quiz.length : 0;
+        if (total === 0) return res.success({ score: 0, total: 0 }, "Không có quiz.");
+
+        let score = 0;
+        const detailedResults = lesson.quiz.map((q, index) => {
+            const isCorrect = Number(answers[index]) === q.correctAnswer;
+            if (isCorrect) score++;
+            return { question: q.question, isCorrect, explanation: q.explanation };
+        });
+
+        const currentScore = (score / total) * 100;
+
+        // CẬP NHẬT TIẾN ĐỘ AN TOÀN (Fix lỗi NaN)
+        const progress = await Progress.findOne({ userId, planId });
+        
+        let prevAverage = progress?.averageScore || 0;
+        let prevTotal = progress?.totalQuizzesDone || 0;
+
+        let newTotalQuizzes = prevTotal + 1;
+        // Tính toán tránh NaN
+        let newAverage = ((prevAverage * prevTotal) + currentScore) / newTotalQuizzes;
+        if (isNaN(newAverage)) newAverage = currentScore;
+
+        await Progress.findOneAndUpdate(
+            { userId, planId },
+            { 
+                $set: { averageScore: newAverage, totalQuizzesDone: newTotalQuizzes },
+                $addToSet: { completedDays: Number(dayNumber) },
+                $pull: { knowledgeMap: { topic: lesson.title } } 
+            },
+            { upsert: true }
+        );
+
+        await Progress.findOneAndUpdate(
+            { userId, planId },
+            { $push: { knowledgeMap: { topic: lesson.title, score: currentScore } } }
+        );
+
+        // Mở khóa bài tiếp theo
+        await Lesson.findOneAndUpdate({ planId, dayNumber: Number(dayNumber) + 1 }, { status: 'in-progress' });
+        await Lesson.findByIdAndUpdate(lesson._id, { status: 'completed' });
+
+        return res.success({ score, total, percentage: Math.round(currentScore), detailedResults });
+    } catch (error) {
+        console.error("Lỗi submit quiz:", error);
+        return res.error(error.message, 500);
+    }
 };
 
 const getAllQuizzes = async (req, res) => {
@@ -411,56 +414,7 @@ const searchQuizzes = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-const submitLessonQuiz = async (req, res) => {
-    try {
-        const { planId, dayNumber, answers } = req.body; // answers: {0: 1, 1: 0...}
-        const userId = req.user.id;
 
-        // 1. Tìm bài học để lấy bộ câu hỏi gốc
-        const lesson = await Lesson.findOne({ planId, dayNumber });
-        if (!lesson) return res.status(404).json({ success: false, message: "Không tìm thấy bài học" });
-
-        let score = 0;
-        const totalQuestions = lesson.quiz.length;
-        
-        // 2. Chấm điểm
-        const results = lesson.quiz.map((q, index) => {
-            const userAnswer = answers[index];
-            const isCorrect = Number(userAnswer) === q.correctAnswer;
-            if (isCorrect) score++;
-            return {
-                question: q.question,
-                isCorrect,
-                correctAnswer: q.correctAnswer,
-                userAnswer: userAnswer,
-                explanation: q.explanation
-            };
-        });
-
-        // 3. Cập nhật trạng thái bài học thành 'completed'
-        lesson.status = 'completed';
-        await lesson.save();
-
-        // 4. (Tùy chọn) Mở khóa bài học tiếp theo (Ngày n + 1)
-        await Lesson.findOneAndUpdate(
-            { planId, dayNumber: Number(dayNumber) + 1 },
-            { status: 'in-progress' }
-        );
-
-        res.status(200).json({
-            success: "true",
-            data: {
-        score: score,
-        totalQuestions: totalQuestions,
-        results: results, // Mảng chi tiết đúng sai
-        percentage: Math.round((score / totalQuestions) * 100)
-    }
-});
-
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-};
 
 module.exports = {
   generateQuiz,

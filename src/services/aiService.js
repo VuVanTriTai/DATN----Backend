@@ -1,3 +1,4 @@
+// services/aiService.js
 const { generateEmbedding } = require("./embeddingService");
 const { searchRelevantChunks } = require("./vectorSearchService");
 const Groq = require("groq-sdk");

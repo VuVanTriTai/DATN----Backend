@@ -1,13 +1,36 @@
+// utils/cleanText.js — TABLE-PRESERVING CLEANER
+"use strict";
+
 /**
- * Làm sạch văn bản thô theo tiêu chuẩn tài liệu RAG đề xuất
+ * cleanText: làm sạch nhưng BẢO TOÀN:
+ *  - Markdown table rows (| ... |)
+ *  - Heading structure (# ...)  
+ *  - List structure (- * +)
  */
 const cleanText = (text) => {
-    if (!text) return "";
-    return text
-        .replace(/(Trang chủ|Tìm kiếm|Đăng nhập|Liên hệ|Bản quyền|---)/gi, "") // Xóa menu/footer nhiễu
-        .replace(/\n\s*\n/g, "\n\n") // Chuẩn hóa khoảng trắng
-        .replace(/[^\S\r\n]+/g, " ") // Xóa khoảng trắng thừa trên 1 dòng
-        .trim();
+  if (!text || typeof text !== "string") return "";
+
+  return text
+    .split("\n")
+    .map((line) => {
+      // BẢO TOÀN Markdown table rows
+      if (/^\s*\|/.test(line)) return line;
+      
+      // BẢO TOÀN headings
+      if (/^#{1,6}\s/.test(line.trim())) return line;
+      
+      // BẢO TOÀN lists
+      if (/^[\s]*[-*+]\s/.test(line)) return line;
+
+      // Clean normal lines: reduce excessive whitespace
+      return line
+        .replace(/\s{3,}/g, "  ")   // >2 spaces → 2 spaces
+        .replace(/\t/g, "  ")       // tab → 2 spaces
+        .trimEnd();                 // remove trailing spaces
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")     // max 2 consecutive blank lines
+    .trim();
 };
 
 module.exports = { cleanText };
