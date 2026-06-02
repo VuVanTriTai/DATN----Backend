@@ -24,7 +24,11 @@ app.use('/api/assignment', require('./routes/assignmentRoutes'));
 app.use('/api/enrollment', require('./routes/enrollmentRoutes'));
 app.use('/api/attempt', require('./routes/attemptRoutes'));
 app.use('/api/document', require('./routes/documentRoutes'));
-
+app.use('/api/instructor', require('./routes/instructorRoutes')); 
+app.use('/api/market',     require('./routes/marketRoutes')); 
+app.use('/api/lesson-quiz', require('./routes/lessonQuizRoutes')); // ✅ Adaptive Learning Quiz
+app.use('/api/instructor-directory', require('./routes/instructorDirectoryRoutes')); // ✅ Thư mục Giáo viên
+app.use('/api/admin',               require('./routes/adminRoutes'));                 // ✅ Admin Panel
 
 
 // 4. Middleware xử lý lỗi cuối cùng (Global Error Handler)

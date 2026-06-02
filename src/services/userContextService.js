@@ -1,4 +1,5 @@
 // services/personalizationService.js
+// Dịch vụ này sẽ xử lý các logic liên quan đến cá nhân hóa trải nghiệm học tập của người dùng, như cập nhật bộ nhớ học tập và xác định chế độ học tập phù hợp dựa trên tiến trình của họ.
 const UserMemory = require("../models/UserMemory");
 
 /**

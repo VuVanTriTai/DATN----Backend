@@ -1,13 +1,14 @@
 const express = require("express");
 const router = express.Router();
-const enrollmentController = require("../controllers/enrollmentController");
+const instructorController = require("../controllers/instructorController");
 const verifyToken = require("../middlewares/authMiddleware");
 const { checkRole } = require("../middlewares/roleMiddleware");
 
-// Instructor xem danh sách học viên đang quản lý
-router.get("/my-students", verifyToken, checkRole(['instructor']), enrollmentController.getMyStudents);
+// Giảng viên lấy danh sách khóa học mình dạy
+router.get("/my-courses", verifyToken, checkRole(['instructor']), instructorController.getMyCourses);
 
-// Instructor chấp nhận hướng dẫn
-router.put("/accept/:id", verifyToken, checkRole(['instructor']), enrollmentController.acceptStudent);
+// Giảng viên xem chi tiết Dashboard của 1 khóa học
+router.get("/course/:planId/stats", verifyToken, checkRole(['instructor']), instructorController.getCourseDashboardStats);
+
 
 module.exports = router;

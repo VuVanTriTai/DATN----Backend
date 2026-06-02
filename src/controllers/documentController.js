@@ -1,81 +1,118 @@
-// controllers/documentController.js
+// src/controllers/documentController.js
 const Document = require("../models/Document");
+const Chunk = require("../models/Chunk"); // Để xóa dữ liệu vector liên quan
 const { extractTextFromFile } = require("../services/fileParserService");
-const planService = require("../services/planService"); // RAG
-
+const planService = require("../services/planService");
+const crypto = require("crypto");
 /**
- * Upload + auto RAG
+ * 1. Upload tài liệu và xử lý RAG (Lưu Vector cho Chat)
  */
 const uploadDocument = async (req, res) => {
   try {
     const userId = req.user.id;
+    const { originalname } = req.file; 
 
+    // Kiểm tra file từ Multer/Cloudinary/R2
     if (!req.file) {
-      return res.error("Không có file nào được tải lên", 400);
+      return res.status(400).json({ success: false, message: "Không có file nào được tải lên" });
     }
 
-    const { path, mimetype, originalname } = req.file;
-    console.log("📄 Đang xử lý file:", originalname);
+    // Cloudflare R2/Cloudinary trả về link nằm trong req.file.location hoặc req.file.path
+    const cloudinaryLink = req.file.location || req.file.path;
 
-    // 1. Trích xuất văn bản
-    const text = await extractTextFromFile(path, mimetype);
 
-    // 2. Kiểm tra độ dài văn bản (Logic chuyển từ Route sang đây)
+    console.log("📄 Đang bóc tách file:", originalname);
+
+    // 1. Trích xuất văn bản và metadata từ file
+    const result = await extractTextFromFile(req.file);
+    const text = result.text;
+    const metadata = result.metadata;
+
+    // 2. Kiểm tra tính hợp lệ của nội dung
     if (!text || text.trim().length < 50) {
-      return res.error("Nội dung tài liệu quá ngắn để xử lý.", 400);
+      return res.status(400).json({ success: false, message: "Tài liệu quá ngắn hoặc không có nội dung chữ." });
     }
 
     if (text.length > 100000) {
-      return res.error("Tài liệu quá lớn (tối đa 100,000 ký tự).", 400);
+      return res.status(400).json({ success: false, message: "Tài liệu quá lớn (tối đa 100,000 ký tự)." });
     }
 
-    // 3. Lưu tài liệu vào Database
-    const doc = await Document.create({
+    // 3. TẠO MÃ HASH ĐỂ KIỂM TRA TRÙNG LẶP
+    const currentHash = crypto.createHash("md5").update(text).digest("hex");
+
+    // 4. KIỂM TRA XEM TÀI LIỆU ĐÃ TỒN TẠI CHƯA
+    let doc = await Document.findOne({ userId, contentHash: currentHash });
+
+    if (doc) {
+      console.log("♻️ Tài liệu đã tồn tại.");
+      // Nếu bản ghi cũ thiếu link Cloudinary thì cập nhật bổ sung
+      if (!doc.fileUrl) {
+        doc.fileUrl = cloudinaryLink;
+        await doc.save();
+        console.log("✅ Đã cập nhật bổ sung fileUrl cho tài liệu cũ.");
+      }
+      return res.success(doc, "Tài liệu đã tồn tại và đã được cập nhật liên kết.");
+    }
+
+    // 5. LƯU TÀI LIỆU MỚI (Sử dụng lại biến doc đã let ở trên, không dùng const)
+    doc = await Document.create({
       userId,
       title: originalname,
       content: text,
-      fileUrl: path
+      fileUrl: cloudinaryLink,      // LƯU LINK CLOUDINARY VÀO ĐÂY
+      contentHash: currentHash,
+      metadata: metadata || {}
     });
 
-    // 4. Xử lý RAG (Lưu Vector 1024-dim cho Chat)
-    console.log("🧠 Đang tạo Embedding cho tài liệu...");
+    // 6. Xử lý RAG (Lưu Vector 1024-dim để hỗ trợ Chat)
+    console.log("🧠 Đang tạo dữ liệu Vector cho tài liệu...");
     await planService.processAndStoreDocument(doc._id, text);
 
-    return res.success(doc, "Tài liệu đã được tải lên và sẵn sàng để hỗ trợ học tập.");
+    return res.status(201).json({
+      success: true,
+      message: "Tài liệu đã được lưu và xử lý AI thành công.",
+      data: doc
+    });
 
   } catch (err) {
     console.error("❌ Upload error:", err.message);
-    return res.error(err.message, 500);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
 /**
- * Lấy tài liệu
+ * 2. Lấy toàn bộ tài liệu đã tải lên của tôi
  */
 const getMyDocuments = async (req, res) => {
   try {
     const docs = await Document.find({ userId: req.user.id }).sort({ createdAt: -1 });
-    
-    // Trả về theo chuẩn res.success để Frontend nhận được res.success = true
-    return res.success(docs); 
+    return res.success(docs);
   } catch (err) {
+    console.error("❌ Get documents error:", err.message);
     return res.error(err.message, 500);
   }
 };
 
 /**
- * Xóa
+ * 3. Xóa tài liệu
  */
 const deleteDocument = async (req, res) => {
   try {
-    await Document.deleteOne({
-      _id: req.params.id,
-      userId: req.user.id
-    });
+    const { id } = req.params;
+    const userId = req.user.id;
 
-    res.success(null, "Đã xóa");
+    const doc = await Document.findOne({ _id: id, userId });
+    if (!doc) return res.error("Không tìm thấy tài liệu", 404);
+
+    // Xóa tài liệu trong DB
+    await Document.findByIdAndDelete(id);
+
+    // XÓA CẢ DỮ LIỆU VECTOR (CHUNKS) ĐỂ DỌN DẸP BỘ NHỚ
+    await Chunk.deleteMany({ planId: id }); // Lưu ý: planId ở đây là OID của document trong hệ thống RAG
+
+    return res.success(null, "Đã xóa tài liệu và dữ liệu AI liên quan.");
   } catch (err) {
-    res.error(err.message);
+    return res.error(err.message, 500);
   }
 };
 

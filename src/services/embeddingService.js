@@ -1,85 +1,97 @@
-// services/embeddingService.js
-const { pipeline } = require('@xenova/transformers');
+"use strict";
+
+const { pipeline } = require("@xenova/transformers");
 
 let extractor = null;
-let loadPromise = null; // Tránh race condition khi nhiều req load cùng lúc
+let loadPromise = null;
 
-const MAX_CHARS = 1800; // Nhỏ hơn 2000 để tránh cắt đứt giữa token multi-byte
+const MAX_CHARS = 500;
 
 /**
- * Singleton loader — thread-safe với Promise lock
+ * Tải Model theo cơ chế Singleton và đợi tuyệt đối
  */
 const getExtractor = async () => {
-    if (extractor) return extractor;
+  if (extractor) return extractor;
+  
+  if (!loadPromise) {
+    console.log("🧠 Đang khởi tạo Model Embedding (Local)...");
+    loadPromise = pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+      execution_providers: ['cpu'], // Ép chạy CPU để tránh lỗi Driver GPU
+    });
+  }
 
-    // FIX: Nếu đang load thì chờ promise cũ thay vì tạo pipeline mới
-    if (!loadPromise) {
-        loadPromise = pipeline('feature-extraction', 'Xenova/multilingual-e5-large')
-            .then((pipe) => {
-                extractor = pipe;
-                loadPromise = null;
-                return extractor;
-            })
-            .catch((err) => {
-                loadPromise = null; // reset để có thể retry
-                throw err;
-            });
-    }
+  try {
+    extractor = await loadPromise;
+    console.log("✅ Model đã nạp vào RAM thành công!");
+    return extractor;
+  } catch (err) {
+    loadPromise = null;
+    console.error("❌ Lỗi nạp model AI:", err.message);
+    throw err;
+  }
+};
 
-    return loadPromise;
+const cleanText = (text) => {
+  if (!text) return "";
+  return text.replace(/\s+/g, " ").trim().substring(0, MAX_CHARS);
 };
 
 /**
- * Chuẩn bị input theo đúng format E5
- * type: "query" | "passage"
+ * Tạo 1 vector
  */
-const buildInput = (text, type = 'passage') => {
-    const prefix  = type === 'query' ? 'query: ' : 'passage: ';
-    const cleaned = text.replace(/\s+/g, ' ').trim().substring(0, MAX_CHARS);
-    return prefix + cleaned;
+const generateEmbedding = async (text) => {
+  try {
+    if (!text || text.trim().length === 0) return null;
+    const pipe = await getExtractor();
+    
+    const output = await pipe(cleanText(text), {
+      pooling: "mean",
+      normalize: true,
+    });
+
+    return Array.from(output.data);
+  } catch (err) {
+    console.error("❌ Lỗi tạo vector đơn:", err.message);
+    return null;
+  }
 };
 
 /**
- * Embed một text đơn
+ * Tạo batch vector (Sửa lỗi logic chia tách mảng)
  */
-const generateEmbedding = async (text, type = 'passage') => {
-    if (!text?.trim()) throw new Error('Input text is empty');
-
-    const pipe   = await getExtractor();
-    const input  = buildInput(text, type);
-    const output = await pipe(input, { pooling: 'mean', normalize: true });
-
-    return [...output.data]; // spread nhanh hơn Array.from một chút
-};
-
-/**
- * FIX MỚI: Batch embedding — xử lý nhiều texts cùng lúc
- * Giảm overhead load model lặp đi lặp lại
- * @param {string[]} texts
- * @param {'query'|'passage'} type
- * @param {number} batchSize - tuỳ VRAM/RAM của bạn
- */
-const generateEmbeddingsBatch = async (texts, type = 'passage', batchSize = 16) => {
-    if (!texts?.length) return [];
-
-    const pipe    = await getExtractor();
+const generateEmbeddingsBatch = async (texts, type = "passage", batchSize = 2) => {
+  try {
+    if (!texts || texts.length === 0) return [];
+    
+    const pipe = await getExtractor();
     const results = [];
 
+    // Xử lý từng batch nhỏ để không treo RAM
     for (let i = 0; i < texts.length; i += batchSize) {
-        const batch  = texts.slice(i, i + batchSize);
-        const inputs = batch.map((t) => buildInput(t, type));
+      const batch = texts.slice(i, i + batchSize);
+      const inputs = batch.map(t => cleanText(t));
 
-        // @xenova/transformers hỗ trợ array input
-        const outputs = await pipe(inputs, { pooling: 'mean', normalize: true });
+      const outputs = await pipe(inputs, { 
+        pooling: "mean", 
+        normalize: true 
+      });
 
-        // outputs.data có shape [batchSize, dims] — cần slice từng dòng
-        const dims = outputs.data.length / batch.length;
-        for (let j = 0; j < batch.length; j++) {
-            results.push([...outputs.data.slice(j * dims, (j + 1) * dims)]);
-        }
+      // Logic chia mảng dữ liệu chính xác
+      const vectorSize = outputs.data.length / batch.length;
+      for (let j = 0; j < batch.length; j++) {
+        const start = j * vectorSize;
+        const end = (j + 1) * vectorSize;
+        results.push(Array.from(outputs.data.slice(start, end)));
+      }
+      
+      console.log(`⏳ Đã xử lý: ${Math.min(i + batchSize, texts.length)}/${texts.length} chunks`);
     }
 
     return results;
+  } catch (err) {
+    console.error("❌ Lỗi tạo vector batch:", err.message);
+    return new Array(texts.length).fill(null);
+  }
 };
 
 module.exports = { generateEmbedding, generateEmbeddingsBatch };

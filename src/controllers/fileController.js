@@ -1,3 +1,4 @@
+// src/controllers/fileController.js
 const { extractTextFromFile } = require('../utils/extractText');
 
 const extractText = async (req, res) => {
@@ -5,31 +6,56 @@ const extractText = async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ success: false, message: 'Vui lòng upload một file.' });
         }
-        // Kiểm tra xem Cloudinary có trả về path (URL) không
-        console.log("✅ File đã lên Cloudinary:", req.file.path);
 
-        // Gọi util để trích xuất văn bản (PDF/DOCX)
-        const content = await extractTextFromFile(req.file);
+        // SỬA TẠI ĐÂY: extractTextFromFile trả về { text, metadata }
+        const result = await extractTextFromFile(req.file);
+        
+        const { text, metadata } = result;
 
-        if (!content || content.trim().length < 50) {
-            return res.status(400).json({ success: false, message: 'Tài liệu quá ngắn hoặc không thể đọc được nội dung.' });
-        }
-
+        // Trả về kết quả đầy đủ cho Frontend
         return res.status(200).json({
             success: true,
-            fileUrl: req.file.path, // Đây là link để bạn lưu vào Database
+            fileUrl: req.file.location || req.file.path,
             fileName: req.file.originalname,
-            textLength: content.length,
-            content: content.trim() // Trả về để Frontend lưu vào state rawText
+            textLength: text.length,
+            content: text.trim(), // Bây giờ text mới là string để trim
+            metadata: metadata     // Trả về metadata (số từ, độ khó...) để hiển thị
         });
 
     } catch (error) {
         console.error('FileController Error:', error);
         return res.status(500).json({
             success: false,
-            message: error.message || 'Lỗi trong quá trình xử lý file.'
+            message: error.message || 'Có lỗi xảy ra trong quá trình xử lý file.'
         });
+    } finally {
+        // Xóa file tạm ở local sau khi extract xong để tránh đầy ổ cứng
+        if (req.file && req.file.path && !req.file.path.startsWith('http')) {
+            const fs = require('fs');
+            if (fs.existsSync(req.file.path)) {
+                try {
+                    fs.unlinkSync(req.file.path);
+                } catch (e) {
+                    console.error("Lỗi khi xóa file tạm:", e);
+                }
+            }
+        }
     }
 };
 
-module.exports = { extractText };
+const uploadFile = async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'Vui lòng upload một file.' });
+        }
+        return res.status(200).json({
+            success: true,
+            fileUrl: req.file.location || req.file.path,
+            fileName: req.file.originalname,
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+module.exports = { extractText, uploadFile };

@@ -1,100 +1,367 @@
+// services/vectorSearchService.js
+"use strict";
+
 const mongoose = require("mongoose");
 const Chunk = require("../models/Chunk");
 const axios = require("axios");
 
-/**
- * 🔍 VECTOR SEARCH CHÍNH XÁC
- */
+
+// ─────────────────────────────────────────────
+// VECTOR SEARCH (SAFE VERSION)
+// ─────────────────────────────────────────────
+
 const searchRelevantChunks = async (planId, queryEmbedding, limit = 5) => {
   try {
     const oid = new mongoose.Types.ObjectId(planId);
 
-    // 1. Kiểm tra dữ liệu thực tế
-    const count = await Chunk.countDocuments({ planId: oid });
-    console.log(`📊 Kiểm tra DB: Plan ${planId} có ${count} chunks.`);
+    console.log(`🔍 Vector search plan=${planId}`);
 
-    // 2. Thực hiện Vector Search
-    let results = await Chunk.aggregate([
-      {
-        $vectorSearch: {
-          index: "vector_index",
-          path: "embedding",
-          queryVector: queryEmbedding,
-          numCandidates: 100,
-          limit: limit * 2, // Lấy dư ra để lọc trùng
-          filter: { planId: oid },
-        },
-      },
-      {
-        $project: {
-          content: 1,
-          score: { $meta: "vectorSearchScore" },
-        },
-      },
-    ]);
-
-    // 3. Xử lý sau khi có kết quả (Tránh lỗi Initialization)
-    if (!results || results.length === 0) {
-      console.warn("⚠️ Vector search rỗng → fallback lấy chunk đầu tiên");
-      results = await Chunk.find({ planId: oid }).limit(limit).lean();
+    // ❗ FIX 1: Guard embedding
+    if (!Array.isArray(queryEmbedding) || queryEmbedding.length === 0) {
+      console.warn("⚠️ queryEmbedding invalid → fallback DB");
+      return fallbackRandomChunks(oid, limit);
     }
 
-    // Lọc trùng nội dung (Dùng Set)
-    const seen = new Set();
-    const uniqueResults = [];
-    for (const r of results) {
-      if (!seen.has(r.content)) {
-        seen.add(r.content);
-        uniqueResults.push(r);
-      }
+    let results = [];
+
+    try {
+      results = await Chunk.aggregate([
+        {
+          $vectorSearch: {
+            index: "vector_index",
+            path: "embedding",
+            queryVector: queryEmbedding,
+            numCandidates: 50, // 🔥 giảm load
+            limit: limit * 2,
+            filter: { planId: oid },
+          },
+        },
+        {
+          $project: {
+            content: 1,
+            section: 1,
+            topic: 1,
+            score: { $meta: "vectorSearchScore" },
+          },
+        },
+      ]);
+    } catch (err) {
+      console.warn("⚠️ Vector search failed:", err.message);
     }
 
-    // Cắt ngắn và format kết quả
-    const cleaned = uniqueResults.slice(0, limit).map((r) => ({
-      content: r.content.substring(0, 1000), 
-      score: r.score || 0.5,
-    }));
+    // ❗ FIX 2: fallback nếu fail hoặc rỗng
+    if (!results?.length) {
+      return fallbackRandomChunks(oid, limit);
+    }
 
-    console.log(`✅ Tìm thấy ${cleaned.length} đoạn văn bản liên quan.`);
-    return cleaned;
+    return postProcess(results, limit);
+
   } catch (error) {
-    console.error("❌ Vector Search Error:", error.message);
+    console.error("❌ searchRelevantChunks error:", error.message);
     return [];
   }
 };
 
+// ─────────────────────────────────────────────
+// TOPIC-FILTERED VECTOR SEARCH
+// ─────────────────────────────────────────────
+
 /**
- * 🚀 RE-RANKER (Sử dụng Cross-Encoder theo tài liệu của bạn)
+ * Vector search có topic filter.
+ * Chỉ trả về chunks thuộc các topic cho phép.
+ * Nếu allowedTopics rỗng → fallback sang searchRelevantChunks (không filter).
+ *
+ * @param {string} planId
+ * @param {number[]} queryEmbedding
+ * @param {string[]} allowedTopics - ví dụ: ["date_function", "string_function"]
+ * @param {number} [limit=5]
  */
-const reRank = async (query, documents) => {
+const searchRelevantChunksByTopic = async (
+  planId, queryEmbedding, allowedTopics = [], limit = 5
+) => {
+  // No topic filter → regular search
+  if (!allowedTopics.length) {
+    return searchRelevantChunks(planId, queryEmbedding, limit);
+  }
+
   try {
-    if (!documents?.length || !process.env.HF_TOKEN) return documents;
+    const oid = new mongoose.Types.ObjectId(planId);
 
-    const response = await axios.post(
-      "https://router.huggingface.co/models/cross-encoder/ms-marco-MiniLM-L6-v2",
-      {
-        inputs: documents.map((doc) => ({
-          source_sentence: query,
-          sentences: [doc.content],
-        })),
-      },
-      {
-        headers: { Authorization: `Bearer ${process.env.HF_TOKEN}` },
-        timeout: 10000,
-      }
-    );
+    console.log(`🔍 Topic-filtered search plan=${planId} topics=${allowedTopics.join(",")}`);
 
-    const scores = response.data;
-    const ranked = documents.map((doc, i) => ({
-      ...doc,
-      reRankScore: scores[i] ?? 0,
-    }));
+    if (!Array.isArray(queryEmbedding) || queryEmbedding.length === 0) {
+      console.warn("⚠️ queryEmbedding invalid → fallback topic DB");
+      return fallbackTopicChunks(oid, allowedTopics, limit);
+    }
 
-    return ranked.sort((a, b) => b.reRankScore - a.reRankScore);
-  } catch (err) {
-    console.error("⚠️ Re-rank fail, dùng kết quả gốc:", err.message);
-    return documents;
+    let results = [];
+
+    try {
+      // Atlas Vector Search có hỗ trợ pre-filter theo field
+      // NOTE: filter trong $vectorSearch chỉ dùng được khi field đó
+      // được index trong Atlas Vector Index dưới dạng "filter".
+      // Nếu chưa có, dùng $match sau $vectorSearch.
+      results = await Chunk.aggregate([
+        {
+          $vectorSearch: {
+            index: "vector_index",
+            path: "embedding",
+            queryVector: queryEmbedding,
+            numCandidates: Math.max(100, limit * 10),  // lấy nhiều để filter sau
+            limit: limit * 6,                           // rộng để sau $match có đủ
+            filter: { planId: oid },
+          },
+        },
+        // Post-filter theo topic (hoạt động dù Atlas filter field hay không)
+        {
+          $match: {
+            topic: { $in: allowedTopics }
+          },
+        },
+        {
+          $project: {
+            content: 1,
+            section: 1,
+            topic: 1,
+            score: { $meta: "vectorSearchScore" },
+          },
+        },
+        { $limit: limit * 2 },
+      ]);
+    } catch (err) {
+      console.warn("⚠️ Topic vector search failed:", err.message);
+    }
+
+    if (!results?.length) {
+      console.warn("⚠️ Topic filter → fallback DB");
+      return fallbackTopicChunks(oid, allowedTopics, limit);
+    }
+
+    return postProcess(results, limit);
+
+  } catch (error) {
+    console.error("❌ searchRelevantChunksByTopic error:", error.message);
+    // Last-resort fallback: không filter topic
+    return searchRelevantChunks(planId, queryEmbedding, limit);
   }
 };
 
-module.exports = { searchRelevantChunks, reRank };
+// ─────────────────────────────────────────────
+// FALLBACK
+// ─────────────────────────────────────────────
+
+const fallbackRandomChunks = async (oid, limit) => {
+  const docs = await Chunk.find({ planId: oid })
+    .select("content section topic")
+    .limit(limit * 2)
+    .lean();
+
+  console.warn(`⚠️ Fallback DB → ${docs.length} chunks`);
+
+  return postProcess(docs, limit);
+};
+
+// Fallback: filter theo topic thôi, không có vector
+const fallbackTopicChunks = async (oid, allowedTopics, limit) => {
+  const docs = await Chunk.find({
+    planId: oid,
+    topic: { $in: allowedTopics }
+  })
+    .select("content section topic")
+    .limit(limit * 2)
+    .lean();
+
+  console.warn(`⚠️ Topic Fallback DB → ${docs.length} chunks`);
+
+  // Nếu cạn không có chunk nào khớp topic → bỏ filter, lấy tất cả
+  if (!docs.length) {
+    return fallbackRandomChunks(oid, limit);
+  }
+
+  return postProcess(docs, limit);
+};
+
+// ─────────────────────────────────────────────
+// POST PROCESS (dedupe + trim)
+// ─────────────────────────────────────────────
+
+const postProcess = (results, limit) => {
+  const seen = new Set();
+  const unique = [];
+
+  for (const r of results) {
+    if (!r?.content || seen.has(r.content)) continue;
+    seen.add(r.content);
+    unique.push(r);
+  }
+
+  const final = unique.slice(0, limit).map(r => ({
+    content: r.content.substring(0, 3000), // Tăng giới hạn để không mất chữ
+    section: r.section || "",
+    topic: r.topic || "general",
+    score: r.score || 0.5
+  }));
+
+  console.log(`✅ Retrieved ${final.length} chunks`);
+  return final;
+};
+
+// ─────────────────────────────────────────────
+// COSINE SIM (SAFE)
+// ─────────────────────────────────────────────
+
+const cosineSim = (a, b) => {
+  if (!a || !b || a.length !== b.length) return 0;
+
+  let dot = 0, na = 0, nb = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
+};
+
+// ─────────────────────────────────────────────
+// SECTION SEARCH (SAFE)
+// ─────────────────────────────────────────────
+
+const escapeRegex = (s) =>
+  String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Bỏ markdown ATX đầu dòng + gom khoảng trắng — khớp với chunk.section thường không có # */
+const normalizeSectionQuery = (s) => {
+  let t = String(s || "").trim();
+  t = t.replace(/^#{1,6}\s+/, "");
+  t = t.replace(/\s+/g, " ").trim();
+  return t;
+};
+
+/**
+ * Từ mỗi coveredSection tạo 1–2 mẫu regex ngắn (dedupe) để khớp Chunk.section.
+ */
+const buildSectionSearchPatterns = (coveredSections) => {
+  const or = [];
+  const seen = new Set();
+
+  const pushPattern = (fragment) => {
+    const f = String(fragment || "").trim();
+    if (f.length < 2) return;
+    const rx = escapeRegex(f).substring(0, 40);
+    if (rx.length < 2) return;
+    const key = rx.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    or.push({ section: { $regex: rx, $options: "i" } });
+  };
+
+  for (const raw of coveredSections) {
+    const norm = normalizeSectionQuery(raw);
+    if (!norm) continue;
+
+    pushPattern(norm.substring(0, 40));
+
+    const m = norm.match(/^(\d+(?:\.\d+)+)\s+(.+)/);
+    if (m) {
+      const words = m[2].trim().split(/\s+/).slice(0, 4).join(" ");
+      if (words.length >= 2) {
+        const alt = `${m[1]} ${words}`.trim().substring(0, 40);
+        if (alt !== norm.substring(0, Math.min(40, norm.length))) {
+          pushPattern(alt);
+        }
+      }
+    }
+  }
+
+  return or;
+};
+
+const searchChunksBySection = async (planId, coveredSections, queryEmbedding, limit = 6) => {
+  try {
+    const oid = new mongoose.Types.ObjectId(planId);
+
+    // ❗ FIX: embedding invalid → fallback luôn
+    if (!Array.isArray(queryEmbedding)) {
+      return searchRelevantChunks(planId, queryEmbedding, limit);
+    }
+
+    if (!coveredSections?.length) {
+      return searchRelevantChunks(planId, queryEmbedding, limit);
+    }
+
+    const patterns = buildSectionSearchPatterns(coveredSections);
+    if (!patterns.length) {
+      return searchRelevantChunks(planId, queryEmbedding, limit);
+    }
+
+    const chunks = await Chunk.find({
+      planId: oid,
+      $or: patterns
+    }).select("content section embedding").lean();
+
+    console.log(`📂 Section search → ${chunks.length} chunks`);
+
+    if (!chunks.length) {
+      return searchRelevantChunks(planId, queryEmbedding, limit);
+    }
+
+    const scored = chunks
+      .filter(c => Array.isArray(c.embedding))
+      .map(c => ({
+        content: c.content.substring(0, 3000),
+        section: c.section || "",
+        score: cosineSim(queryEmbedding, c.embedding)
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    return scored.slice(0, limit);
+
+  } catch (err) {
+    console.error("❌ searchChunksBySection error:", err.message);
+    return searchRelevantChunks(planId, queryEmbedding, limit);
+  }
+};
+
+// ─────────────────────────────────────────────
+// RE-RANK (OPTIONAL - SAFE)
+// ─────────────────────────────────────────────
+
+const reRank = async (query, docs) => {
+  try {
+    // ❗ FIX: disable nếu không cần
+    if (!docs?.length || !process.env.HF_TOKEN) {
+      return docs;
+    }
+
+    const res = await axios.post(
+      "https://router.huggingface.co/models/cross-encoder/ms-marco-MiniLM-L6-v2",
+      {
+        inputs: docs.map(d => ({
+          source_sentence: query,
+          sentences: [d.content]
+        }))
+      },
+      {
+        headers: { Authorization: `Bearer ${process.env.HF_TOKEN}` },
+        timeout: 5000 // 🔥 tránh treo
+      }
+    );
+
+    return docs
+      .map((d, i) => ({ ...d, score: res.data?.[i] ?? d.score }))
+      .sort((a, b) => b.score - a.score);
+
+  } catch (err) {
+    console.warn("⚠️ reRank failed:", err.message);
+    return docs;
+  }
+};
+
+module.exports = {
+  searchRelevantChunks,
+  searchRelevantChunksByTopic,
+  searchChunksBySection,
+  reRank
+};

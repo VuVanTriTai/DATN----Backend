@@ -1,0 +1,198 @@
+Cơ sở dữ liệu nâng caoCHƯƠNG IVSTORED PROCEDURE & GIAO DỊCH
+
+Nội dung trình bày
+
+1. Stored Procedure2. Giao dịch
+
+1. Stored Procedure
+
+1.1 Các tùy chọn lập trình thủ tục trongTransact-SQLKiểu Nhóm câuLệnh (Batch)Lưu trữ Thực thi Tham số
+
+Mã kịch bản(Script)
+
+Gồm nhiều nhómcâu lệnh
+
+Trong file trên ổ đĩa
+
+Từ công cụ clientnhư ManagementStudio hoặcSQLCMD
+
+Không
+StoredProcedure
+
+Duy nhất
+Trong đối tượng của CSDL
+
+Bởi ứng dụng hoặctrong mã kịch bảnSQL
+
+Có
+Hàm ngườidùng địnhnghĩa
+
+Duy nhất
+Trong đối tượng của CSDL
+
+Bởi ứng dụng hoặctrong mã kịch bảnSQL
+
+Có Trigger Duy nhất
+Trong đối tượng của CSDL
+
+Tự động bởi serverkhi một truy vấnhành động cụ thểxảy ra
+
+Không
+ Stored Procedure là một tập các câu lệnh T-SQL thực hiệnmột nhiệm vụ cụ thể, được đặt tên và lưu trữ trong CSDLdưới dạng đã biên dịch. Stored procedure cung cấp một phương pháp hữu ích choviệc thực thi lặp lại cùng một nhiệm vụ◦ Giúp tái sử dụng code◦ Khi thực thi lại một nhiệm vụ, sử dụng lời gọi Stored Procedurethay vì viết và thực thi lại cùng một tập hợp các câu lệnh. Cách sử dụng các biến, cấu trúc điều khiển trong StoredProcedure tương tự như mã kịch bản
+
+1.2 Stored Procedure
+
+ Ví dụ◦ Đoạn mã kịch bản tạo Stored Procedure spCopyInvoices, thựchiện copy dữ liệu từ bảng Invoices sang bảng Invoice Copy◦ Mỗi lần thực hiện copy dữ liệu, chỉ cần thực hiện lời gọi SP◦ EXEC spCopyInvoicesUSE APIF OBJECT_ID('spCopyInvoices') IS NOT NULLDROP PROC spCopyInvoicesGOCREATE PROC spCopyInvoicesASIF OBJECT_ID('InvoiceCopy') IS NOT NULLDROP TABLE InvoiceCopySELECT * INTO InvoiceCopy FROM Invoices
+
+1.2 Stored Procedure
+
+ Cú pháp:CREATE {PROC|PROCEDURE} <tên thủ tục>[<Danh sách tham số>][WITH [RECOMPILE] [, ENCRYPTION] [, <mệnh đề EXECUTEAS>]]AS <Các câu lệnh SQL> Chú ý:◦ Tên thủ tục Chứa tối đa 128 kí tự Nên đặt tên với tiền tố sp◦ Câu lệnh CREATE PROC phải là câu lệnh đầu tiên của một nhómcâu lệnh
+
+1.3 Cú pháp
+
+ Hai loại tham số:◦ Tham số đầu vào Tham số bắt buộc Bắt buộc phải truyền giá trị cho tham số này Tham số tùy chọn: Đã được gán giá trị mặc định. Nếu không truyền giá trị trong lời gọi thủ tục. Tham số sẽ nhận giá trị mặc định.◦ Tham số đầu ra Sử dụng đề lấy kết quả trả về từ thủ tục Khai báo bằng từ khóa OUTPUT Cú pháp <danh sách tham số>@<tham số 1> <kiểu dữ liệu> [= <mặc định>] [OUTPUT|OUT][, @<tham số 2> <kiểu dữ liệu> [= <mặc định>]
+
+1.4 Khai báo và làm việc với tham số
+
+[OUTPUT|OUT]]...
+
+Lưu ý: Giá trị mặc định có thể NULL. Trong trường hợp này, nếungười sử dụng không cung cấp tham số, SQL Server sẽ thihành thủ tục theo các tham số khác Giá trị mặc định có thể bao gồm các ký tự đại diện (%, _, [ ],[^] ) nếu thủ tục sử dụng tham số với từ khóa LIKE.
+
+1.4 Khai báo và làm việc với tham số
+
+ Ví dụ◦ Stored Procedure sử dụng một tham số đầu ra và hai tham sốđầu vào1.4 Khai báo và làm việc với tham sốCREATE PROC spInvTotal3@InvTotal money OUTPUT,@DateVar smalldatetime = NULL,@VendorVar varchar(40) = '%'AS-- Nếu @Date Var không được truyền giá trị-- Gán giá trị cho @DateVar bằng ngày hóa đơn nhỏ nhấtIF @DateVar IS NULLSELECT @DateVar = MIN(InvoiceDate) FROM Invoices-- Truy xuất tổng số tiền của các hóa đơn có ngày hóa đơn lớn hơn @DateVar-- của nhà cung cấp có VendorName được lọc theo giá trị biến @VendorVarSELECT @InvTotal = SUM(InvoiceTotal)FROM Invoices JOIN VendorsON Invoices.VendorID = Vendors.VendorID
+
+WHERE
+(InvoiceDate >= @DateVar) AND(VendorName LIKE @VendorVar)
+
+Tham số đầu raTham số đầu vào tuỳ chọnTham số đầu vào tùy chọn
+
+ Hai cách truyền giá trị cho tham số◦ Truyền theo tên◦ Truyền theo vị trí Lời gọi thủ tục truyền tham số theo vị tríDECLARE @MyInvTotal money
+
+1.4 Khai báo và làm việc với tham số
+
+EXEC spInvTotal3 @MyInvTotal OUTPUT, '2008-06-01', 'P%'SELECT @MyInvTotal
+
+ Lời gọi thủ tục truyền tham số theo tên Lời gọi thủ tục không truyền giá trị cho tham số tùy chọnDECLARE @MyInvTotal moneyEXEC spInvTotal3 @DateVar = '2008-06-01', @VendorVar = 'P%',@InvTotal = @MyInvTotal OUTPUT
+
+1.4 Khai báo và làm việc với tham số
+
+DECLARE @MyInvTotal moneyEXEC spInvTotal3 @DateVar = '2008-06-01', @InvTotal = @MyInvTotal OUTPUT
+
+ Giá trị trả về của thủ tục◦ Sử dụng tham số OUTPUT để trả về giá trị có kiểu dữ liệu bất kì◦ Sử dụng hàm RETURN để trả về giá trị số nguyên Cú pháp câu lệnh RETURNRETURN <biểu thức số nguyên>
+
+1.5 Làm việc với giá trị trả về
+
+ Ví dụ◦ Trả về số lượng hóa đơn của nhà cung cấp có VendorName thỏamãn điều kiến lọc @VendorVar và có ngày hóa đơn lớn hơn giátrị của biến @DateVarCREATE PROC spInvCount@DateVar smalldatetime = NULL,@VendorVar varchar(40) = '%'ASIF @DateVar IS NULLSELECT @DateVar = MIN(InvoiceDate) FROM InvoicesDECLARE @InvCount intSELECT @InvCount = COUNT(InvoiceID)FROM Invoices JOIN VendorsON Invoices.VendorID = Vendors.VendorIDWHERE ((InvoiceDate >= @DateVar) AND(VendorName LIKE @VendorVar))RETURN @InvCount
+
+1.5 Làm việc với giá trị trả về
+
+ Ví dụ◦ Lời gọi Stored ProcedureDECLARE @InvCount int
+
+1.5 Làm việc với giá trị trả về
+
+EXEC @InvCount = spInvCount '2008-06-01', 'P%'PRINT 'Invoice count: ' + CONVERT(varchar, @InvCount)
+
+ Xử lý lỗi◦ Câu lệnh TRY … CATCH Ngăn chặn lỗi◦ Kiểm tra tính hợp lệ của dữ liệu.◦ Nếu dữ liệu không hợp lệ, sử dụng câu lệnh RAISERROR đểsinh lỗi.
+
+1.6 Kiểm tra tính hợp lệ của dữ liệu và tạothông báo lỗi
+
+Cú phápRAISERROR ({<ID của thông báo lỗi>|<chuỗi thông báo>}, <độnghiêm trọng>, <trạng thái>)Chú ý:Câu lệnh RAISERROR được truyền tham số <ID của thông báolỗi> sẽ tạo một lỗi hệ thốngCâu lệnh RAISERROR được truyền tham số <chuỗi thông báo>sẽ tạo một thông báo lỗi chính là tham số được truyền vào.Tham số <Độ nghiêm trọng> chỉ ra mức độ nghiêm trọng củalỗi.Giá trị từ 11 -> 19. Lỗi được tạo ra sẽ được xử lý trong khối CATCHGiá trị từ 20 -> 25. Kết nối từ client tới CSDL sẽ bị ngắt đột ngột
+
+1.6 Kiểm tra tính hợp lệ của dữ liệu và tạothông báo lỗi
+
+ Ví dụ◦ Chỉ thực hiện câu lệnh chèn dữ liệu vào bảng Invoices khi thamsố đầu vào VendorID hợp lệ (đã tồn tại trong bảng Vendors)CREATE PROC spInsertInvoice@VendorID int, @InvoiceNumber varchar(50),ASIF EXISTS (SELECT * FROM Vendors WHERE VendorID = @VendorID)BEGININSERT InvoicesVALUES (@VendorID,@InvoiceNumber,@InvoiceDate,@InvoiceTotal,0,0,@TermsID,@InvoiceDueDate,NULL)ENDELSEBEGINRAISERROR('Not a valid VendorID!', 11, 1)END
+
+1.6 Kiểm tra tính hợp lệ của dữ liệu và tạothông báo lỗi
+
+@InvoiceDate smalldatetime, @InvoiceTotal money,@TermsID int, @InvoiceDueDate smalldatetime
+
+ Ví dụ◦ Mã kịch bản gọi Stored ProcedureBEGIN TRYEXEC spInsertInvoice799,'ZXK-799', '2008-07-01', 299.95,1, '2008-08-01'END TRYBEGIN CATCHPRINT 'An error occurred.'PRINT 'Message: ' + CONVERT(varchar, ERROR_MESSAGE())IF ERROR_NUMBER() = 50000PRINT 'This is a custom error message.'END CATCH
+
+1.6 Kiểm tra tính hợp lệ của dữ liệu và tạothông báo lỗi
+
+ Sử dụng hàm SP_helptext◦ Sp_helptext ‘Tên Stored Procedure’ Chú ý: Người dùng không thể xem nội dung của một Spđược định nghĩa sử dụng tùy chọn ENCRYPTION
+
+1.7 Xem nội dung của một Stored Proceduretrong CSDL
+
+ Cú pháp của câu lệnh DROP PROCDROP {PROC|PROCEDURE} <tên thủ tục> [, …] Cú pháp của câu lệnh ALTER PROCALTER {PROC|PROCEDURE} <tên thủ tục>[<Danh sách tham số>][WITH [RECOMPILE] [, ENCRYPTION] [, <mệnh đề EXECUTEAS>]]AS <Các câu lệnh SQL>
+
+1.8 Xóa/ Chỉnh sửa nội dung thủ tục
+
+ Ví dụ◦ Câu lệnh tạo Stored Procedure◦ Câu lệnh chỉnh sửa nội dung Stored Procedure◦ Câu lệnh xóa thủ tụcCREATE PROC spVendorState@State varchar(20)ASSELECT VendorName FROM Vendors WHERE VendorState = @StateALTER PROC spVendorState@State varchar(20) = NULLASIF @State IS NULLSELECT VendorName FROM VendorsELSESELECT VendorName FROM Vendors WHERE VendorState = @StateDROP PROC spVendorState
+
+1.8 Xóa/ Chỉnh sửa nội dung thủ tục
+
+2. Giao dịch
+
+ Xét dữ liệu trong hai bảng Invoices và InvoiceItemLinetương ứng với InvoiceId = 12InvoiceTotal = ∑ InvoiceLineItemAmoutDECLARE @InvoiceID int- Câu lệnh Insert 1 và 2thực thi thành công.- Câu lệnh Insert 3 thựcthi thất bại.
+
+2.1 Vấn đề không nhất quán khi chèn dữ liệu
+
+INSERT InvoicesVALUES (34, 'ZXA-080','2008-08-30', 14092.59, 0, 0,3, '2008-09-30',NULL)SET @InvoiceID = @@IDENTITYINSERT InvoiceLineItemsVALUES (@InvoiceID, 1, 160, 4447.23, 'HW Upgrade')INSERT InvoiceLineItemsVALUES (@InvoiceID, 2, 167, 9645.36, 'OS upgrade‘)
+
+ Để đảm bảo tính nhất quán của dữ liệu trong ví dụ trên.◦ Nếu một câu lệnh chèn trong ba câu lệnh chèn thực thi thất bại.Tất cả các câu lệnh chèn phải được hủy bỏ=> Các câu lệnh chèn trên phải được đặt trong một giao dịch Giao dịch◦ Giao dịch là một nhóm thao tác cơ sở dữ liệu được kết hợp thànhmột đơn vị lôgíc.
+
+2.2 Giao dịch
+
+ Ví dụDECLARE @InvoiceID intBEGIN TRYBEGIN TRANINSERT InvoicesVALUES (34,'ZXA-080','2008-08-30',14092.59,0,0,3,'2008-09-30',NULL, NULL)SET @InvoiceID = @@IDENTITYINSERT InvoiceLineItemsVALUES (@InvoiceID,1,160,4447.23,'HW upgrade')INSERT InvoiceLineItemsVALUES (@InvoiceID,2,167,9645.36,'OS upgrade')COMMIT TRANEND TRYBEGIN CATCHROLLBACK TRANEND CATCH- 3 câu lệnh INSERT chỉđược cập nhật thực sự vàCSDL khi giao dịch đượcCOMMIT- Khi một câu lệnh chènxảy ra lỗi. Câu lệnhCATCH sẽ xử lý lỗi này vàthực hiện câu lệnhROLLBACK TRAN ->Toàn bộ lệnh chèn sẽ bịhủy bỏ.
+
+2.2 Giao dịch
+
+ Nên sử dụng giao dịch trong các trường hợp sau:◦ Khi viết mã hai hay nhiều truy vấn thao tác tác động tới các dữliệu có liên kết◦ Khi cập nhật tham chiếu khóa ngoại.◦ Khi chuyển hàng từ bảng này sang bảng khác.◦ Khi bạn viết truy vấn SELECT trước một truy vấn thao tác, và giátrị được chèn vào từ truy vấn thao tác này lại dựa trên kết quảcủa truy vấn SELECT.◦ Khi sự thất bại của tập câu lệnh SQL nào đó sẽ vi phạm tính toànvẹn dữ liệu.
+
+2.3 Các trường hợp sử dụng giao dịch
+
+ Chú ý:◦ Có thể bỏ từ khóa TRAN khi viết câu lệnh COMMIT hoặcROLLBACK. Tuy nhiên nên viết mã có từ khóa này◦ Nếu không khai báo điểm bắt đầu cho giao dịch. SQL Server sẽ xử lý mỗi câu lệnh là một giao dịch và tự động COMMIT Nếu câu lệnh gây lỗi sẽ tự động ROLLBACK
+
+2.4 Các câu lệnh xử lý giao dịch
+
+Câu lệnh Mô tả
+EGIN {TRAN|TRANSACTION}
+
+Đánh dấu điểm bắt đầu giao dịch.
+
+AVE {TRAN|TRASACTION} save_point
+
+Thiết lập điểm lưu trữ mới bên trong giao dịch.
+
+OMMIT [TRAN|TRANSACTION]
+
+Đánh dấu điểm kết thúc giao dịch và thực hiện thayđổi trong giao dịch, đồng thời thay đổi vĩnh viễn trênCSDL
+
+ROLLBACK [[TRAN|TRANSACTION]save_point]]
+
+Roll-back (Quay lui) giao dịch tới điểm bắt đầu giaodịch hoặc đến điểm lưu trữ xác định.
+
+ Ví dụ◦ Kiểm tra trước khi Commit giao dịchBEGIN TRANDELETE InvoicesWHERE VendorID = 34-- Nếu số hàng bị xóa bởi câu lệnh DELETE lớn hơn 1. Thực hiện-- quay lui, không thực hiện lệnh xóa. Chỉ xóa khi số hàng bị ảnh hưởng bởi-- lệnh DELETE nhỏ hơn 1IF @@ROWCOUNT > 1BEGINROLLBACK TRANPRINT 'Deletions rolled back.'ENDELSEBEGINCOMMIT TRANPRINT 'Deletions committed to the database.'END
+
+2.4 Các câu lệnh xử lý giao dịch
+
+ Giao dịch lồng (nested transaction) là giao dịch được viết bêntrong một giao dịch khác. Mỗi khi câu lệnh BEGIN TRAN được thực thi, hàm hệ thống@@TRANCOUNT được tăng thêm 1. Khi thực thi câu lệnh COMMIT TRAN◦ Nếu @@TRANCOUNT > 1, các thay đổi sẽ không được commit.Thay vào đó @@TRANCOUNT giảm đi 1.◦ Nếu @@TRANCOUNT = 1, mọi thay đổi đã được thực hiện trênCSDL trong suốt giao dịch sẽ được commit và @@TRANCOUNTđược gán bằng 0. Câu lệnh ROLLBACK TRAN roll-back toàn bộ các giao dịchđang hoạt động và thiết lập giá trị cho @@TRANCOUNT về0.
+
+2.5 Giao dịch lồng
+
+ Ví dụTRAN -- Bắt đầu giao dịch 1TRAN@VendorsCount int, @InvoicesCount int
+
+2.5 Giao dịch lồng
+
+BEGIN PRINT 'First Tran @@TRANCOUNT: ' + CONVERT(varchar,@@TRANCOUNT)DELETE InvoicesBEGIN TRAN -- Bắt đầu giao dịch 2PRINT 'Second Tran @@TRANCOUNT: ' + CONVERT(varchar,@@TRANCOUNT)DELETE VendorsCOMMIT TRAN -- Câu lệnh COMMIT này làm giảm giá trị @@TRANCOUNT.-- Không COMMIT câu lệnh 'DELETE Vendors'.PRINT 'COMMIT @@TRANCOUNT: ' + CONVERT(varchar,@@TRANCOUNT)ROLLBACK PRINT 'ROLLBACK @@TRANCOUNT: ' + CONVERT(varchar,@@TRANCOUNT)PRINT ' 'DECLARE SELECT @VendorsCount = COUNT (*) FROM VendorsSELECT @InvoicesCount = COUNT (*) FROM InvoicesPRINT 'Vendors Count: ' + CONVERT (varchar , @VendorsCount)PRINT 'Invoices Count: ' + CONVERT (varchar , @InvoicesCount)
+
+ Câu lệnh ROLLBACK TRAN có thể quay lui giao dịch tớiđiểm bắt đầu giao dịch hoặc đến điểm lưu trữ xác định. Để câu lệnh ROLLBACK TRAN quay lui giao dịch đến điểmlưu trữ xác định, thực hiện như sau◦ Tạo điểm lưu trữ sử dụng câu lệnh SAVE TRAN◦ Viết câu lệnh ROLLBACK TRAN kèm theo tên điểm lưu trữ Nếu câu lệnh ROLLBACK TRAN không đi kèm tên điểm lưutrữ. Câu lệnh này sẽ quay lui toàn bộ giao dịch
+
+6 Điểm lưu trữ (Save Point)
+
+ Ví dụIF OBJECT_ID ( 'tempdb..#VendorCopy' ) IS NOT NULLDROP TABLE tempdb.. #VendorCopySELECT VendorID, VendorName INTO #VendorCopy FROM Vendors WHERE VendorID < 5BEGIN TRANDELETE #VendorCopy WHERE VendorID = 1SAVE TRAN Vendor1 -- Điểm lưu trữ 1DELETE #VendorCopy WHERE VendorID = 2SAVE TRAN Vendor2 -- Điểm lưu trữ 2DELETE #VendorCopy WHERE VendorID = 3SELECT * FROM #VendorCopyROLLBACK TRAN Vendor2 -- Quay lui về điểm lưu trữ 2SELECT * FROM #VendorCopyROLLBACK TRAN Vendor1 -- Quay lui về điểm lưu trữ 1SELECT * FROM #VendorCopyCOMMIT TRANSELECT * FROM #VendorCopy
+
+6 Điểm lưu trữ (Save Point)
+
+Tổng kết
+ Các nội dung đã học trong bài◦ Stored Procedure (SP) Là một tập các câu lệnh T-SQL thực hiện một nhiệm vụ cụ thể, đượcđặt tên và lưu trữ trong CSDL dưới dạng đã biên dịch. Khi thực thi lại một nhiệm vụ, sử dụng lời gọi Stored Procedure thay vìviết và thực thi lại cùng một tập hợp các câu lệnh.◦ Cú phápCREATE {PROC|PROCEDURE} <tên thủ tục>[<Danh sách tham số>][WITH [RECOMPILE] [, ENCRYPTION] [, <mệnh đề EXCECUTE AS>]]AS <Các câu lệnh SQL>
+
+Tổng kết
+ Hai loại tham số◦ Tham số đầu vào Tham số đầu vào bắt buộc Tham số đầu vào tùy chọn◦ Tham số đầu ra: Trả về giá trị cho đối tượng gọi SP Hai cách trả về giá trị cho một SP◦ Sử dụng tham số đầu ra◦ Sử dụng câu lệnh RETURN Gọi Stored Procedure: Sử dụng câu lệnh EXEC◦ Hai cách truyền tham số trong lời gọi Truyền theo vị trí Truyền theo tên
+
+Tổng kết
+ Giao dịch◦ Giao dịch là một nhóm thao tác cơ sở dữ liệu được kết hợp thànhmột đơn vị lôgíc.◦ Chỉ khi giao dịch được COMMIT, các câu lệnh trong giao dịch mớithực sự thay đổi CSDL◦ Khi một câu lệnh trong một giao dịch gây lỗi. Giao dịch sẽ đượcquay lui (ROLLBACK) về điểm bắt đầu giao dịch hoặc về điểmlưu trữ giao dịch
+
+HẾT CHƯƠNG IVThank you for listening!

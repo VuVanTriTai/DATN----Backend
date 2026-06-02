@@ -1,3 +1,5 @@
+// utils/paginate.js
+// Hàm này sẽ giúp chúng ta thực hiện phân trang cho các truy vấn MongoDB một cách dễ dàng và nhất quán trên toàn bộ ứng dụng. Chúng ta có thể sử dụng nó trong các controller để trả về dữ liệu theo từng trang, giúp cải thiện hiệu suất và trải nghiệm người dùng khi làm việc với tập dữ liệu lớn.
 const paginate = async (model, filter = {}, options = {}) => {
     const page = parseInt(options.page) || 1;
     const limit = Math.min(parseInt(options.limit) || 10, 50);

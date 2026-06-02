@@ -61,12 +61,18 @@ const generateSyllabus = async (rawText, numDays) => {
  */
 const processAndStoreDocument = async (planId, text) => {
     const cleaned = cleanText(text);
-    const chunks = chunkText(cleaned); // Đảm bảo chunkText.js dùng MAX_WORDS = 350
-    
+    const chunks = chunkText(cleaned);
+
     const docs = [];
+
     for (const c of chunks) {
-        // Sử dụng type="passage" cho việc lưu trữ
         const embedding = await generateEmbedding(c.content, "passage");
+
+        if (!embedding || embedding.length === 0) {
+            console.warn(`❌ Skip chunk ${c.index} (embedding null)`);
+            continue; // 🔥 QUAN TRỌNG
+        }
+
         docs.push({
             planId,
             content: c.content,
@@ -75,7 +81,14 @@ const processAndStoreDocument = async (planId, text) => {
             metadata: { wordCount: c.wordCount }
         });
     }
+
+    if (!docs.length) {
+        console.error("❌ Không có embedding hợp lệ → dừng");
+        return;
+    }
+
     await Chunk.insertMany(docs);
+    console.log(`✅ Saved ${docs.length} chunks`);
 };
 
 /**
@@ -177,3 +190,41 @@ module.exports = {
 
     generateScientificLesson
 };
+
+
+
+
+const baseDays = wordCount > 2500 ? 10 : wordCount > 1200 ? 7 : 5;
+    const bumpDeep = learningGoals.depth === "deep" ? 2 : 0;
+    const shrinkBasic = learningGoals.depth === "basic" ? -1 : 0;
+    let fbDays = Math.max(DAYS_MIN, Math.min(DAYS_MAX, baseDays + bumpDeep + shrinkBasic));
+    
+    
+    analysis = {
+      suggestedTitle: "Khoa hoc tu tai lieu tai len",
+      difficulty: wordCount > 2500 ? "Hard" : wordCount > 1200 ? "Medium" : "Easy",
+      suggestedDays: fbDays,
+      summary: "He thong tam dung che do du phong do AI qua tai.",
+    };
+  
+
+  let finalDays = parseInt(analysis.suggestedDays);
+  if (isNaN(finalDays)) finalDays = 7;
+  finalDays = Math.max(DAYS_MIN, Math.min(DAYS_MAX, finalDays));
+
+  let preview;
+  try {
+    preview = await generateSyllabus(text, finalDays, learningGoals);
+  } catch (err) {
+    console.warn("generateSyllabus fallback:", err.message);
+    preview = { syllabus: buildFallbackPreviewPlan(text, finalDays) };
+  }
+
+  return {
+    analysis: {
+      ...analysis,
+      suggestedDays: finalDays,
+      learningGoals,
+    },
+    previewPlan: preview.syllabus,
+  };

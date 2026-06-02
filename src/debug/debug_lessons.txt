@@ -1,0 +1,381 @@
+
+════════════════════════════════════════════════════════════════════════════════
+  KHOÁ HỌC: Stored Procedure và Giao dịch
+  Plan ID : 6a1c1acef2aaf28d20440cf0
+  Xuất lúc: 2026-05-31 18:30:10
+  Số ngày : 3
+════════════════════════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────────────────────────
+  ▶  NGÀY 1: Stored Procedure
+────────────────────────────────────────────────────────────────────────────────
+  Lesson ID : 6a1c1b20f2aaf28d20440d12
+  Status    : in-progress
+  Quiz type : main
+  Quiz pool : 0 câu
+
+  [TÓM TẮT]
+  Stored Procedure là một tập các câu lệnh T-SQL thực hiện một nhiệm vụ cụ thể, được đặt tên và lưu trữ trong CSDL dưới dạng đã biên dịch.
+
+  [LƯU Ý QUAN TRỌNG]
+  [1] Stored Procedure cung cấp một phương pháp hữu ích cho việc thực thi lặp lại cùng một nhiệm vụ
+  [2] Stored Procedure giúp tái sử dụng code
+  [3]  Sử dụng hàm SP_helptext◦ Sp_helptext ‘Tên Stored Procedure’ Chú ý: Người dùng không thể xem nội dung của một Spđược định nghĩa sử dụng tùy chọn ENCRYPTION
+  [4] 1.1 Các tùy chọn lập trình thủ tục trongTransact-SQLKiểu Nhóm câuLệnh (Batch)Lưu trữ Thực thi Tham số
+  [5] Roll-back (Quay lui) giao dịch tới điểm bắt đầu giaodịch hoặc đến điểm lưu trữ xác định.
+
+  [NỘI DUNG BÀI HỌC]
+
+  ## Stored Procedure
+  
+  ### 1.1 Các tùy chọn lập trình thủ tục trong Transact-SQL
+  
+  * Kiểu Nhóm câu Lệnh (Batch)
+  * Lưu trữ
+  * Thực thi
+  * Tham số
+  * Mã kịch bản (Script)
+  
+  ### 1.2 Stored Procedure
+  
+  * Stored Procedure là một tập các câu lệnh T-SQL thực hiện một nhiệm vụ cụ thể, được đặt tên và lưu trữ trong CSDL dưới dạng đã biên dịch.
+  * Stored procedure cung cấp một phương pháp hữu ích cho việc thực thi lặp lại cùng một nhiệm vụ.
+  * Giúp tái sử dụng code.
+  * Khi thực thi lại một nhiệm vụ, sử dụng lời gọi Stored Procedure thay vì viết và thực thi lại cùng một tập hợp các câu lệnh.
+  
+  ### 1.3 Cú pháp
+  
+  * Cú pháp của Stored Procedure bao gồm:
+   + `CREATE PROCEDURE` để tạo một Stored Procedure mới.
+   + `AS` để chỉ định bắt đầu của câu lệnh.
+   + `BEGIN` để chỉ định bắt đầu của khối lệnh.
+   + `END` để chỉ định kết thúc của khối lệnh.
+   + `SELECT`, `INSERT`, `UPDATE`, `DELETE` để thực hiện các thao tác cơ sở dữ liệu.
+  
+  ### 1.6 Kiểm tra tính hợp lệ của dữ liệu và tạo thông báo lỗi
+  
+  * Hàm `RAISERROR` được sử dụng để tạo thông báo lỗi.
+  * Cú pháp của hàm `RAISERROR` bao gồm:
+   + `{<ID của thông báo lỗi>|<chuỗi thông báo>}` để chỉ định thông báo lỗi.
+   + `<độ nghiêm trọng>` để chỉ định mức độ nghiêm trọng của lỗi.
+   + `<trạng thái>` để chỉ định trạng thái của lỗi.
+  
+  ### 2.1 Vấn đề không nhất quán khi chèn dữ liệu
+  
+  * Khi chèn dữ liệu vào CSDL, cần đảm bảo tính nhất quán của dữ liệu.
+  * Nếu một câu lệnh chèn trong ba câu lệnh chèn thực thi thất bại, tất cả các câu lệnh chèn phải được hủy bỏ.
+  * Các câu lệnh chèn trên phải được đặt trong một giao dịch.
+  
+  ### 2.4 Các câu lệnh xử lý giao dịch
+  
+  * Câu lệnh `BEGIN TRAN` để đánh dấu điểm bắt đầu giao dịch.
+  * Câu lệnh `COMMIT TRAN` để thực hiện thay đổi trong giao dịch và thay đổi vĩnh viễn trên CSDL.
+  * Câu lệnh `ROLLBACK TRAN` để roll-back giao dịch tới điểm bắt đầu giao dịch hoặc đến điểm lưu trữ xác định.
+  
+  ### Ví dụ
+  
+  * Ví dụ về việc sử dụng giao dịch để đảm bảo tính nhất quán của dữ liệu khi chèn dữ liệu vào CSDL.
+  * Ví dụ về việc sử dụng hàm `RAISERROR` để tạo thông báo lỗi.
+  
+  ### Tóm tắt ghi nhớ
+  
+  * Stored Procedure là một tập các câu lệnh T-SQL thực hiện một nhiệm vụ cụ thể, được đặt tên và lưu trữ trong CSDL dưới dạng đã biên dịch.
+  * Hàm `RAISERROR` được sử dụng để tạo thông báo lỗi.
+  * Câu lệnh `BEGIN TRAN` để đánh dấu điểm bắt đầu giao dịch.
+  * Câu lệnh `COMMIT TRAN` để thực hiện thay đổi trong giao dịch và thay đổi vĩnh viễn trên CSDL.
+  * Câu lệnh `ROLLBACK TRAN` để roll-back giao dịch tới điểm bắt đầu giao dịch hoặc đến điểm lưu trữ xác định.
+
+────────────────────────────────────────────────────────────────────────────────
+  🔒 NGÀY 2: Làm việc với tham số và giá trị trả về
+────────────────────────────────────────────────────────────────────────────────
+  Lesson ID : 6a1c1b6ef2aaf28d20440d1a
+  Status    : locked
+  Quiz type : main
+  Quiz pool : 0 câu
+
+  [TÓM TẮT]
+  Bài học về làm việc với tham số và giá trị trả về trong Stored Procedure
+
+  [LƯU Ý QUAN TRỌNG]
+  [1] Giá trị mặc định của tham số có thể là NULL
+  [2] Giá trị mặc định có thể bao gồm các ký tự đại diện (%, _, [ ],[^] ) nếu thủ tục sử dụng tham số với từ khóa LIKE
+  [3] Nếu không khai báo điểm bắt đầu cho giao dịch, SQL Server sẽ xử lý mỗi câu lệnh là một giao dịch và tự động COMMIT
+  [4] Nếu câu lệnh gây lỗi sẽ tự động ROLLBACK
+  [5] DECLARE @MyInvTotal moneyEXEC spInvTotal3 @DateVar = '2008-06-01', @InvTotal = @MyInvTotal OUTPUT
+  [6] EXEC @InvCount = spInvCount '2008-06-01', 'P%'PRINT 'Invoice count: ' + CONVERT(varchar, @InvCount)
+  [7] 1.8 Xóa/ Chỉnh sửa nội dung thủ tục
+  [8]  Xét dữ liệu trong hai bảng Invoices và InvoiceItemLinetương ứng với InvoiceId = 12InvoiceTotal = ∑ InvoiceLineItemAmoutDECLARE @InvoiceID int- Câu lệnh Insert 1 và 2thực thi thàn...
+
+  [NỘI DUNG BÀI HỌC]
+
+  ## Làm việc với tham số và giá trị trả về
+  
+  ### 1.4 Khai báo và làm việc với tham số
+  
+  #### Khái niệm
+  
+  Khi tạo một Stored Procedure, chúng ta có thể khai báo các tham số để nhận dữ liệu từ người dùng. Các tham số có thể có giá trị mặc định và có thể được sử dụng để lọc dữ liệu.
+  
+  #### Ví dụ
+  
+  ```sql
+  CREATE PROC spInvTotal3
+      @InvTotal money OUTPUT,
+      @DateVar smalldatetime = NULL,
+      @VendorVar varchar(40) = '%'
+  AS
+      -- Nếu @Date Var không được truyền giá trị
+      -- Gán giá trị cho @DateVar bằng ngày hóa đơn nhỏ nhất
+      IF @DateVar IS NULL
+          SELECT @DateVar = MIN(InvoiceDate) FROM Invoices
+      -- Truy xuất tổng số tiền của các hóa đơn có ngày hóa đơn lớn hơn @DateVar
+      -- của nhà cung cấp có VendorName được lọc theo giá trị biến @VendorVar
+      SELECT @InvTotal = SUM(InvoiceTotal)
+      FROM Invoices JOIN Vendors ON Invoices.VendorID = Vendors.VendorID
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  *   Khai báo tham số với giá trị mặc định
+  *   Sử dụng tham số để lọc dữ liệu
+  
+  ### 1.5 Làm việc với giá trị trả về
+  
+  #### Khái niệm
+  
+  Khi tạo một Stored Procedure, chúng ta có thể trả về giá trị từ Stored Procedure bằng cách sử dụng tham số OUTPUT hoặc hàm RETURN.
+  
+  #### Ví dụ
+  
+  ```sql
+  EXEC @InvCount = spInvCount '2008-06-01', 'P%'
+  PRINT 'Invoice count: ' + CONVERT(varchar, @InvCount)
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  *   Sử dụng tham số OUTPUT để trả về giá trị có kiểu dữ liệu bất kì
+  *   Sử dụng hàm RETURN để trả về giá trị số nguyên
+  
+  ### 1.8 Xóa/ Chỉnh sửa nội dung thủ tục
+  
+  #### Khái niệm
+  
+  Khi cần chỉnh sửa nội dung của một Stored Procedure, chúng ta có thể sử dụng câu lệnh ALTER PROCEDURE.
+  
+  #### Ví dụ
+  
+  ```sql
+  ALTER PROC spInvTotal3
+      @InvTotal money OUTPUT,
+      @DateVar smalldatetime = NULL,
+      @VendorVar varchar(40) = '%'
+  AS
+      -- Nếu @Date Var không được truyền giá trị
+      -- Gán giá trị cho @DateVar bằng ngày hóa đơn nhỏ nhất
+      IF @DateVar IS NULL
+          SELECT @DateVar = MIN(InvoiceDate) FROM Invoices
+      -- Truy xuất tổng số tiền của các hóa đơn có ngày hóa đơn lớn hơn @DateVar
+      -- của nhà cung cấp có VendorName được lọc theo giá trị biến @VendorVar
+      SELECT @InvTotal = SUM(InvoiceTotal)
+      FROM Invoices JOIN Vendors ON Invoices.VendorID = Vendors.VendorID
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  *   Sử dụng câu lệnh ALTER PROCEDURE để chỉnh sửa nội dung của Stored Procedure
+  
+  ### 2.3 Các trường hợp sử dụng giao dịch
+  
+  #### Khái niệm
+  
+  Khi cần thực hiện một số câu lệnh SQL, chúng ta có thể sử dụng giao dịch để đảm bảo tính toàn vẹn của dữ liệu.
+  
+  #### Ví dụ
+  
+  ```sql
+  BEGIN TRANSACTION
+      INSERT INTO Invoices (InvoiceDate, InvoiceTotal)
+      VALUES ('2022-01-01', 1000)
+      INSERT INTO Invoices (InvoiceDate, InvoiceTotal)
+      VALUES ('2022-01-02', 2000)
+      INSERT INTO Invoices (InvoiceDate, InvoiceTotal)
+      VALUES ('2022-01-03', 3000)
+      COMMIT TRANSACTION
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  *   Sử dụng giao dịch để đảm bảo tính toàn vẹn của dữ liệu
+  
+  ### 6 Điểm lưu trữ (Save Point)
+  
+  #### Khái niệm
+  
+  Khi cần lưu trữ một điểm trong giao dịch, chúng ta có thể sử dụng câu lệnh SAVE TRANSACTION.
+  
+  #### Ví dụ
+  
+  ```sql
+  BEGIN TRANSACTION
+      INSERT INTO Invoices (InvoiceDate, InvoiceTotal)
+      VALUES ('2022-01-01', 1000)
+      SAVE TRANSACTION SavePoint
+      INSERT INTO Invoices (InvoiceDate, InvoiceTotal)
+      VALUES ('2022-01-02', 2000)
+      ROLLBACK TRANSACTION SavePoint
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  *   Sử dụng câu lệnh SAVE TRANSACTION để lưu trữ một điểm trong giao dịch
+
+────────────────────────────────────────────────────────────────────────────────
+  🔒 NGÀY 3: Kiểm tra tính hợp lệ của dữ liệu và xử lý lỗi
+────────────────────────────────────────────────────────────────────────────────
+  Lesson ID : 6a1c1bc2f2aaf28d20440d22
+  Status    : locked
+  Quiz type : main
+  Quiz pool : 0 câu
+
+  [TÓM TẮT]
+  Bài học về kiểm tra tính hợp lệ của dữ liệu và xử lý lỗi trong Stored Procedure
+
+  [LƯU Ý QUAN TRỌNG]
+  [1] Sử dụng giao dịch trong các trường hợp cần thiết để đảm bảo tính toàn vẹn dữ liệu
+  [2] Kiểm tra tính hợp lệ của dữ liệu trước khi thực hiện các hành động trên cơ sở dữ liệu
+  [3] 1.8 Xóa/ Chỉnh sửa nội dung thủ tục
+
+  [NỘI DUNG BÀI HỌC]
+
+  ## Kiểm tra tính hợp lệ của dữ liệu và xử lý lỗi
+  
+  ### 1.6 Kiểm tra tính hợp lệ của dữ liệu và tạo thông báo lỗi
+  
+  #### Khái niệm
+  
+  Kiểm tra tính hợp lệ của dữ liệu là quá trình xác minh rằng dữ liệu đầu vào đáp ứng các yêu cầu nhất định trước khi thực hiện các hành động khác.
+  
+  #### Ví dụ
+  
+  ```sql
+  CREATE PROC spInsertInvoice
+      @VendorID int,
+      @InvoiceNumber varchar(50),
+      @InvoiceDate smalldatetime,
+      @InvoiceTotal money,
+      @TermsID int,
+      @InvoiceDueDate smalldatetime
+  AS
+  IF EXISTS (SELECT * FROM Vendors WHERE VendorID = @VendorID)
+  BEGIN
+      INSERT Invoices VALUES (@VendorID, @InvoiceNumber, @InvoiceDate, @InvoiceTotal, 0, 0, @TermsID, @InvoiceDueDate, NULL)
+  END
+  ELSE
+  BEGIN
+      RAISERROR('Not a valid VendorID!', 11, 1)
+  END
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  * Sử dụng IF EXISTS để kiểm tra tính hợp lệ của dữ liệu
+  * Sử dụng RAISERROR để tạo thông báo lỗi khi dữ liệu không hợp lệ
+  
+  ### 1.7 Xem nội dung của một Stored Procedure trong CSDL
+  
+  #### Cú pháp
+  
+  Cú pháp của câu lệnh DROP PROC là:
+  
+  ```sql
+  DROP {PROC|PROCEDURE} <tên thủ tục> [, …]
+  ```
+  
+  Cú pháp của câu lệnh ALTER PROC là:
+  
+  ```sql
+  ALTER {PROC|PROCEDURE} <tên thủ tục>[<Danh sách tham số>][WITH [RECOMPILE] [, ENCRYPTION] [, <mệnh đề EXECUTEAS>]]AS <Các câu lệnh SQL>
+  ```
+  
+  #### Ví dụ
+  
+  ```sql
+  CREATE PROC spVendorState
+      @State varchar(20)
+  AS
+  SELECT VendorName FROM Vendors WHERE VendorState = @State
+  
+  ALTER PROC spVendorState
+      @State varchar(20) = NULL
+  AS
+  IF @State IS NULL
+      SELECT VendorName FROM Vendors
+  ELSE
+      SELECT VendorName FROM Vendors WHERE VendorState = @State
+  
+  DROP PROC spVendorState
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  * Sử dụng DROP PROC để xóa một Stored Procedure
+  * Sử dụng ALTER PROC để chỉnh sửa nội dung của một Stored Procedure
+  
+  ### 1.8 Xóa/ Chỉnh sửa nội dung thủ tục
+  
+  #### Ví dụ
+  
+  ```sql
+  CREATE PROC spVendorState
+      @State varchar(20)
+  AS
+  SELECT VendorName FROM Vendors WHERE VendorState = @State
+  
+  ALTER PROC spVendorState
+      @State varchar(20) = NULL
+  AS
+  IF @State IS NULL
+      SELECT VendorName FROM Vendors
+  ELSE
+      SELECT VendorName FROM Vendors WHERE VendorState = @State
+  
+  DROP PROC spVendorState
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  * Sử dụng CREATE PROC để tạo một Stored Procedure
+  * Sử dụng ALTER PROC để chỉnh sửa nội dung của một Stored Procedure
+  * Sử dụng DROP PROC để xóa một Stored Procedure
+  
+  ### 1.6 Kiểm tra tính hợp lệ của dữ liệu và tạo thông báo lỗi
+  
+  #### Ví dụ
+  
+  ```sql
+  CREATE PROC spInsertInvoice799
+      @InvoiceDate smalldatetime,
+      @InvoiceTotal money,
+      @TermsID int,
+      @InvoiceDueDate smalldatetime
+  AS
+  BEGIN TRY
+      EXEC spInsertInvoice799, 'ZXK-799', '2008-07-01', 299.95, 1, '2008-08-01'
+  END TRY
+  BEGIN CATCH
+      PRINT 'An error occurred.'
+      PRINT 'Message: ' + CONVERT(varchar, ERROR_MESSAGE())
+      IF ERROR_NUMBER() = 50000
+          PRINT 'This is a custom error message.'
+  END CATCH
+  ```
+  
+  #### Tóm tắt ghi nhớ
+  
+  * Sử dụng BEGIN TRY và BEGIN CATCH để xử lý lỗi
+  * Sử dụng RAISERROR để tạo thông báo lỗi khi dữ liệu không hợp lệ
+
+════════════════════════════════════════════════════════════════════════════════
+  KẾT THÚC KHOÁ HỌC: Stored Procedure và Giao dịch
+════════════════════════════════════════════════════════════════════════════════

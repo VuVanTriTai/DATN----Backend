@@ -3,16 +3,25 @@
  */
 
 const VALID_FOCUS = ["theory", "practice"];
+// Định hướng chính của lộ trình: thiên về lý thuyết hay thực hành.
 const VALID_DEPTH = ["basic", "deep"];
+// Mức độ sâu của lộ trình: cơ bản hay chuyên sâu.
 
 const normalizeLearningGoals = (raw) => {
+  // Chuẩn hóa thông tin học tập từ input thô (ví dụ từ form hoặc API request).
+  // Nếu input không hợp lệ hoặc thiếu, sẽ dùng giá trị mặc định.
   const focus = VALID_FOCUS.includes(raw?.focus) ? raw.focus : "theory";
+  // Nếu input không hợp lệ hoặc thiếu, mặc định là "basic" để phù hợp với đa số tài liệu.
   const depth = VALID_DEPTH.includes(raw?.depth) ? raw.depth : "basic";
   return { focus, depth };
 };
 
+
 /** Số câu quiz tối thiểu / tối đa mỗi bài (AI + hậu xử lý). */
 const getQuizBounds = (profile) => {
+  // Quy tắc số lượng câu quiz dựa trên profile học tập:
+  // - THIÊN VỀ THỰC HÀNH thường cần nhiều câu hơn để kiểm tra kỹ năng áp dụng.
+  // - CHUYÊN SÂU cũng có thể yêu cầu nhiều câu hơn để bao quát kiến thức rộng và sâu.
   const { focus, depth } = profile;
   if (focus === "practice" && depth === "deep") return { min: 7, max: 10 };
   if (focus === "practice") return { min: 5, max: 8 };
@@ -21,14 +30,19 @@ const getQuizBounds = (profile) => {
 };
 
 const getLessonMaxTokens = (bounds, profile = null) => {
+  // Giới hạn tokens cho phần giải thích bài giảng 
+  // (không tính quiz).
   let t = bounds.max > 6 ? 2000 : 1200;
+
   if (profile?.focus === "practice" && profile?.depth === "deep") t = Math.max(t, 2600);
   else if (profile?.focus === "practice") t = Math.max(t, 1800);
   return t;
 };
-
+// Khi retry phần giải thích bài giảng (nếu bị cắt ngắn), 
+// //có thể tăng giới hạn tokens để AI có thêm "đất" để hoàn thiện ý tưởng, đặc biệt với profile thiên về thực hành và chuyên sâu.
 const getCompactRetryMaxTokens = (bounds, profile = null) => {
   let t = bounds.max > 6 ? 1600 : 900;
+  
   if (profile?.focus === "practice" && profile?.depth === "deep") t = Math.max(t, 2000);
   else if (profile?.focus === "practice") t = Math.max(t, 1200);
   return t;

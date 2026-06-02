@@ -115,8 +115,15 @@ const submitLessonQuiz = async (req, res) => {
         );
 
         // Mở khóa bài tiếp theo
-        await Lesson.findOneAndUpdate({ planId, dayNumber: Number(dayNumber) + 1 }, { status: 'in-progress' });
+        // 1. Đánh dấu hoàn thành bài hiện tại (ĐÚNG)
         await Lesson.findByIdAndUpdate(lesson._id, { status: 'completed' });
+
+        // 2. Mở khóa bài học của ngày tiếp theo (SỬA LẠI TẠI ĐÂY)
+        const nextDay = Number(dayNumber) + 1;
+        await Lesson.findOneAndUpdate(
+            { planId, dayNumber: nextDay, status: 'locked' },
+            { status: 'in-progress' } // Sửa từ 'completed' thành 'in-progress'
+        );
 
         return res.success({ score, total, percentage: Math.round(currentScore), detailedResults });
     } catch (error) {

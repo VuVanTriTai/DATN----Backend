@@ -1,7 +1,7 @@
 // routes/documentRoutes.js
 const express = require("express");
 const router = express.Router();
-const upload = require("../middlewares/uploadMiddleware");
+const { upload } = require("../middlewares/uploadMiddleware");
 const authMiddleware = require("../middlewares/authMiddleware");
 const { checkRole } = require("../middlewares/roleMiddleware");
 const {

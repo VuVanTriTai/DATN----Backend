@@ -1,346 +1,218 @@
-// utils/extractText.js — OPTIMIZED TABLE SUPPORT VERSION
 "use strict";
 
-const axios   = require("axios");
-const pdfParse = require("pdf-parse");
-const mammoth  = require("mammoth");
+const axios = require("axios");
+const { spawn } = require("child_process");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+// Dùng cleanText từ utils (đã decode HTML entities + xóa noise markers)
+const { cleanText } = require("./cleanText");
 
 // ─────────────────────────────────────────────
-// CONSTANTS
+// CONFIG
 // ─────────────────────────────────────────────
+const DEBUG_DIR = path.join(__dirname, "../debug");
+if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25MB
+const MAX_BUFFER_MB = 60;     // Buffer tối đa 60MB
+const MAX_TEXT_CHARS = 150000; // Text tối đa gửi vào pipeline
+
+// Đường dẫn đến Python script docling
+const DOCLING_SCRIPT = path.join(__dirname, "../scripts/docling_extract.py");
+
+// Tìm Python executable (python3 hoặc python)
+const PYTHON_CMD = (() => {
+  const candidates = ["python3", "python", "py"];
+  return candidates[0]; // Node sẽ thử lần lượt trong runDocling
+})();
 
 // ─────────────────────────────────────────────
-// TABLE RECOVERY HELPERS
+// METADATA
 // ─────────────────────────────────────────────
+const buildMetadata = (file, text, method = "docling") => ({
+  fileName: file.originalname || file.path || "unknown",
+  mimeType: file.mimetype,
+  wordCount: text.split(/\s+/).filter(Boolean).length,
+  lineCount: text.split("\n").length,
+  tableCount: (text.match(/\|/g) || []).length > 10 ? 1 : 0, // Markdown tables có |
+  extractMethod: method,
+});
 
-/**
- * Convert mammoth table element → Markdown table
- */
-const mammothTableToMarkdown = (tableElement) => {
+// ─────────────────────────────────────────────
+// SAVE DEBUG
+// ─────────────────────────────────────────────
+const saveDebug = (text, metadata) => {
   try {
-    const rows = tableElement.children || [];
-    if (!rows.length) return "";
-
-    const parsedRows = rows.map((row) => {
-      const cells = (row.children || []).map((cell) => {
-        const cellText = (cell.children || [])
-          .map((para) =>
-            (para.children || [])
-              .map((run) => run.value || "")
-              .join("")
-          )
-          .join(" ")
-          .replace(/\|/g, "\\|") // escape pipe
-          .trim();
-        return cellText || " ";
-      });
-      return cells;
-    });
-
-    if (!parsedRows.length) return "";
-
-    const header    = parsedRows[0];
-    const separator = header.map(() => "---");
-    const body      = parsedRows.slice(1);
-
-    const lines = [
-      `| ${header.join(" | ")} |`,
-      `| ${separator.join(" | ")} |`,
-      ...body.map((row) => `| ${row.join(" | ")} |`),
-    ];
-
-    return lines.join("\n");
-  } catch {
-    return "";
-  }
-};
-
-/**
- * Custom mammoth transform: table → markdown paragraph
- */
-const mammothTransformDocument = (document) => {
-  const transformElement = (element) => {
-    if (!element) return element;
-
-    if (element.type === "table") {
-      const markdown = mammothTableToMarkdown(element);
-      return {
-        type:     "paragraph",
-        children: [{ type: "run", value: `\n\n${markdown}\n\n` }],
-      };
-    }
-
-    if (Array.isArray(element.children)) {
-      return {
-        ...element,
-        children: element.children.map(transformElement),
-      };
-    }
-
-    return element;
-  };
-
-  return {
-    ...document,
-    children: (document.children || []).map(transformElement),
-  };
-};
-
-/**
- * Phục hồi bảng từ PDF text (whitespace-separated)
- * 
- * Ví dụ PDF raw:
- *   "Tên    Tuổi    Điểm\nAn     20      8.5\nBình   21      9.0"
- * 
- * → Convert thành:
- *   | Tên | Tuổi | Điểm |
- *   |-----|------|------|
- *   | An  | 20   | 8.5  |
- *   | Bình| 21   | 9.0  |
- */
-const recoverPdfTables = (rawText) => {
-  const lines  = rawText.split(/\r?\n/);
-  const result = [];
-
-  let tableBuffer      = [];
-  let inTableCandidate = false;
-
-  const flushTable = () => {
-    if (tableBuffer.length < 2) {
-      // Không đủ dữ liệu → không phải bảng
-      result.push(...tableBuffer);
-      tableBuffer = [];
-      inTableCandidate = false;
-      return;
-    }
-
-    // Parse columns: split trên tab hoặc 2+ spaces
-    const parsedRows = tableBuffer.map((line) =>
-      line
-        .split(/\t|  {2,}/)
-        .map((c) => c.trim().replace(/\|/g, "\\|"))
-        .filter(Boolean)
+    fs.writeFileSync(path.join(DEBUG_DIR, "debug_extracted.txt"), text, "utf-8");
+    fs.writeFileSync(
+      path.join(DEBUG_DIR, "debug_metadata.json"),
+      JSON.stringify(metadata, null, 2),
+      "utf-8"
     );
-
-    // Filter rows có số cột hợp lý so với header
-    const colCount = parsedRows[0].length;
-    const validRows = parsedRows.filter(
-      (r) => r.length >= Math.max(2, colCount - 1) && r.length <= colCount + 1
-    );
-
-    if (validRows.length >= 2 && colCount >= 2) {
-      const header    = validRows[0].map((c) => c || " ");
-      const separator = header.map(() => "---");
-      const body      = validRows.slice(1);
-
-      result.push(`\n| ${header.join(" | ")} |`);
-      result.push(`| ${separator.join(" | ")} |`);
-      body.forEach((row) => {
-        // Pad cho đủ số cột
-        const padded = Array.from({ length: header.length }, (_, i) => row[i] || " ");
-        result.push(`| ${padded.join(" | ")} |`);
-      });
-      result.push("");
-    } else {
-      // Không hợp lệ → giữ nguyên
-      result.push(...tableBuffer);
-    }
-
-    tableBuffer      = [];
-    inTableCandidate = false;
-  };
-
-  for (const line of lines) {
-    const isTableLike =
-      /\t|  {2,}/.test(line) &&                           // có tab hoặc 2+ spaces
-      line.trim().length > 0 &&                           // không empty
-      line.trim().split(/\t|  {2,}/).filter(Boolean).length >= 2; // ít nhất 2 cột
-
-    if (isTableLike) {
-      inTableCandidate = true;
-      tableBuffer.push(line);
-    } else {
-      if (inTableCandidate) flushTable();
-      result.push(line);
-    }
-  }
-
-  // Flush cuối file
-  if (inTableCandidate) flushTable();
-
-  return result.join("\n");
+    console.log(`✅ Debug saved (method: ${metadata.extractMethod})`);
+  } catch (_) { }
 };
 
 // ─────────────────────────────────────────────
-// TEXT POST-PROCESSING
+// GỌI DOCLING QUA PYTHON SUBPROCESS
 // ─────────────────────────────────────────────
+const runDocling = (filePath) => {
+  return new Promise((resolve, reject) => {
+    const pythonCandidates = ["python3", "python", "py"];
+    let attempt = 0;
 
-/**
- * Clean text nhẹ nhàng — KHÔNG phá Markdown tables
- */
-const postProcessExtractedText = (raw) => {
-  if (!raw || typeof raw !== "string") return "";
+    const tryNext = () => {
+      if (attempt >= pythonCandidates.length) {
+        return reject(new Error(
+          "Không tìm thấy Python. Vui lòng cài Python 3 và chạy: pip install docling"
+        ));
+      }
 
-  return raw
-    // Normalize line endings
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    // Remove control chars (trừ tab, newline)
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
-    // Max 2 consecutive blank lines
-    .replace(/\n{3,}/g, "\n\n")
-    // Trim mỗi dòng — EXCEPT Markdown table rows
-    .split("\n")
-    .map((line) => {
-      // Giữ nguyên table rows (start with |)
-      if (/^\s*\|/.test(line)) return line;
-      return line.trimEnd(); // chỉ trim right
-    })
-    .join("\n")
-    .trim();
-};
+      const cmd = pythonCandidates[attempt++];
+      console.log(`[Docling] Thử với: ${cmd} ${DOCLING_SCRIPT} ${filePath}`);
 
-// ─────────────────────────────────────────────
-// FILE METADATA
-// ─────────────────────────────────────────────
-
-/**
- * Extract metadata để AI hiểu file context
- */
-const buildFileMetadata = (file, extractedText) => {
-  const wordCount  = extractedText.split(/\s+/).filter(Boolean).length;
-  const lineCount  = extractedText.split(/\n/).length;
-  const tableCount = (extractedText.match(/^\s*\|/gm) || []).length; // count table rows
-  const hasFormulas =
-    /[=+\-*/^√∑∏≤≥≈∫∂]/.test(extractedText) ||
-    /\b(theorem|lemma|định lý|mệnh đề|công thức|formula|equation)\b/i.test(extractedText);
-
-  return {
-    fileName:   file.originalname || file.path?.split("/").pop() || "unknown",
-    mimeType:   file.mimetype,
-    wordCount,
-    lineCount,
-    tableCount,
-    hasFormulas,
-    estimatedComplexity:
-      wordCount > 5000 ? "high" : 
-      wordCount > 1500 ? "medium" : "low",
-  };
-};
-
-// ─────────────────────────────────────────────
-// MAIN EXTRACTION FUNCTION
-// ─────────────────────────────────────────────
-
-/**
- * extractTextFromFile — return { text, metadata }
- * Thay vì chỉ return text thuần → giúp AI hiểu document tốt hơn
- */
-const extractTextFromFile = async (file) => {
-  try {
-    // Download from Cloudinary
-    console.log(`[extractText] Downloading: ${file.path}`);
-    
-    const response = await axios.get(file.path, {
-      responseType: "arraybuffer",
-      timeout:      30_000,
-      maxContentLength: MAX_FILE_SIZE_BYTES,
-    });
-
-    const buffer = Buffer.from(response.data);
-
-    if (buffer.length === 0) {
-      throw new Error("File rỗng hoặc không thể tải từ Cloudinary.");
-    }
-
-    let rawText = "";
-
-    // ── PDF Processing ──
-    if (file.mimetype === "application/pdf") {
-      console.log(`[extractText] Processing PDF...`);
-      
-      const pdfData = await pdfParse(buffer, {
-        normalizeWhitespace: false,      // giữ layout để detect tables
-        disableCombineTextItems: false,
+      const proc = spawn(cmd, [DOCLING_SCRIPT, filePath], {
+        timeout: 120000, // 2 phút timeout
+        windowsHide: true,
+        env: { ...process.env, PYTHONIOENCODING: "utf-8" },
       });
 
-      rawText = recoverPdfTables(pdfData.text);
-    }
+      const stdoutChunks = [];
+      const stderrChunks = [];
 
-    // ── DOCX Processing ──
-    else if (
-      file.mimetype ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ) {
-      console.log(`[extractText] Processing DOCX...`);
-      
-      // Dùng convertToHtml + transform thay vì extractRawText
-      const htmlResult = await mammoth.convertToHtml(
-        { buffer },
-        {
-          transformDocument: mammothTransformDocument,
-          styleMap: [
-            "p[style-name='Heading 1'] => h1:fresh",
-            "p[style-name='Heading 2'] => h2:fresh", 
-            "p[style-name='Heading 3'] => h3:fresh",
-          ],
+      proc.stdout.on("data", (d) => { stdoutChunks.push(d); });
+      proc.stderr.on("data", (d) => { stderrChunks.push(d); });
+
+      proc.on("error", (err) => {
+        // Lệnh không tồn tại → thử lệnh tiếp theo
+        if (err.code === "ENOENT") {
+          console.warn(`[Docling] ${cmd} không tìm thấy, thử lệnh tiếp...`);
+          return tryNext();
         }
-      );
+        reject(err);
+      });
 
-      // Strip HTML → keep structure
-      rawText = htmlResult.value
-        .replace(/<h1[^>]*>(.*?)<\/h1>/gi, "\n# $1\n")
-        .replace(/<h2[^>]*>(.*?)<\/h2>/gi, "\n## $1\n")
-        .replace(/<h3[^>]*>(.*?)<\/h3>/gi, "\n### $1\n")
-        .replace(/<li[^>]*>(.*?)<\/li>/gi, "\n- $1")
-        .replace(/<br\s*\/?>/gi, "\n")
-        .replace(/<p[^>]*>(.*?)<\/p>/gi, "\n$1\n")
-        .replace(/<tr[^>]*>/gi, "\n")
-        .replace(/<th[^>]*>(.*?)<\/th>/gi, "| $1 ")
-        .replace(/<td[^>]*>(.*?)<\/td>/gi, "| $1 ")
-        .replace(/<[^>]+>/g, "") // strip remaining tags
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)));
+      proc.on("close", (code) => {
+        const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+        const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+
+        if (stderr) {
+          // In stderr để debug nhưng không fail ngay
+          const filtered = stderr.split("\n")
+            .filter(l => !l.startsWith("WARNING") && l.trim())
+            .join("\n");
+          if (filtered) console.warn(`[Docling stderr] ${filtered.substring(0, 500)}`);
+        }
+
+        try {
+          // Lấy dòng JSON cuối cùng trong stdout (docling có thể in log)
+          const lines = stdout.trim().split("\n");
+          const jsonLine = lines.reverse().find(l => l.trim().startsWith("{"));
+          if (!jsonLine) {
+            return reject(new Error(`Docling không trả về JSON. stdout: ${stdout.substring(0, 300)}`));
+          }
+          const result = JSON.parse(jsonLine);
+          if (!result.success) {
+            return reject(new Error(result.error || "Docling thất bại"));
+          }
+          resolve(result);
+        } catch (parseErr) {
+          reject(new Error(`Parse JSON thất bại: ${parseErr.message} | stdout: ${stdout.substring(0, 200)}`));
+        }
+      });
+    };
+
+    tryNext();
+  });
+};
+
+// ─────────────────────────────────────────────
+// MAIN ENTRY
+// ─────────────────────────────────────────────
+const extractTextFromFile = async (file) => {
+  // Bước 1: Lấy buffer từ file (Cloudinary URL hoặc local path)
+  let tempFilePath = null;
+  let buffer;
+
+  try {
+    if (file.path && (file.path.startsWith('http://') || file.path.startsWith('https://'))) {
+      const response = await axios.get(file.path, {
+        responseType: "arraybuffer",
+        timeout: 60000,
+      });
+      buffer = Buffer.from(response.data);
+    } else {
+      // Local path (ví dụ: uploads/temp/...)
+      buffer = fs.readFileSync(file.path);
     }
 
-    // ── TXT / Other Processing ──
-    else {
-      console.log(`[extractText] Processing TXT/Other...`);
-      
-      // Try UTF-8 first, fallback to latin1 if replacement chars found
-      const utf8 = buffer.toString("utf-8");
-      rawText = utf8.includes("\uFFFD")
-        ? buffer.toString("latin1")
-        : utf8;
-    }
-
-    // Validate extraction result
-    if (!rawText || rawText.trim().length < 20) {
+    // Memory guard
+    const bufferMB = buffer.length / (1024 * 1024);
+    console.log(`[Extract] Buffer: ${bufferMB.toFixed(1)}MB`);
+    if (bufferMB > MAX_BUFFER_MB) {
       throw new Error(
-        "Không thể trích xuất nội dung từ tài liệu. " +
-        "File có thể bị hỏng, mã hóa, hoặc chỉ chứa hình ảnh."
+        `File quá lớn (${bufferMB.toFixed(0)}MB). Tối đa ${MAX_BUFFER_MB}MB để xử lý an toàn.`
       );
     }
 
-    const text     = postProcessExtractedText(rawText);
-    const metadata = buildFileMetadata(file, text);
+    const ext = path.extname(file.originalname || ".pdf").toLowerCase() || ".pdf";
+    let rawText = "";
+    let method = "";
 
-    console.log(
-      `[extractText] Success: ${metadata.fileName} → ` +
-      `${metadata.wordCount} words, ${metadata.tableCount} table rows, ` +
-      `complexity=${metadata.estimatedComplexity}`
-    );
+    // Bước 2: Chọn phương pháp trích xuất theo đuôi file
+    if (ext === '.docx') {
+      console.log("[Mammoth] Đang chạy mammoth cho file Word...");
+      const mammoth = require('mammoth');
+      const result = await mammoth.extractRawText({ buffer: buffer });
+      rawText = result.value;
+      method = "mammoth";
+    } else {
+      // Lưu tạm ra đĩa để docling đọc
+      tempFilePath = path.join(os.tmpdir(), `docling_${Date.now()}${ext}`);
+      fs.writeFileSync(tempFilePath, buffer);
+      console.log(`[Docling] Lưu file tạm: ${tempFilePath}`);
 
-    return { text, metadata };
+      console.log("[Docling] Đang chạy docling...");
+      const doclingResult = await runDocling(tempFilePath);
+      rawText = doclingResult.text;
+      method = doclingResult.method || "docling";
+    }
 
-  } catch (error) {
-    console.error("[extractText] Error:", error.message);
-    throw new Error(`Không thể đọc nội dung tài liệu: ${error.message}`);
+    if (!rawText || rawText.length < 20) {
+      throw new Error(`Công cụ (${method}) không extract được text từ tài liệu`);
+    }
+
+    // Bước 4: Clean text
+    let cleaned = cleanText(rawText);
+
+    // Smart truncation cho file cực lớn
+    if (cleaned.length > MAX_TEXT_CHARS) {
+      console.warn(`[Extract] Text quá dài (${cleaned.length} ký tự) → cắt thông minh`);
+      const keepFront = Math.floor(MAX_TEXT_CHARS * 0.6);
+      const keepBack = MAX_TEXT_CHARS - keepFront;
+      cleaned =
+        cleaned.slice(0, keepFront) +
+        "\n\n[... NỘI DUNG ĐÃ ĐƯỢC CẮT BỚT DO FILE QUÁ LỚN ...] \n\n" +
+        cleaned.slice(-keepBack);
+    }
+
+    const metadata = buildMetadata(file, cleaned, method);
+    saveDebug(cleaned, metadata);
+
+    return { text: cleaned, metadata };
+
+  } catch (err) {
+    console.error("[extractText] Error:", err.message);
+    throw err;
+  } finally {
+    // Xóa file tạm dù thành công hay thất bại
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      try {
+        fs.unlinkSync(tempFilePath);
+        console.log(`[Docling] Đã xóa file tạm: ${tempFilePath}`);
+      } catch (_) { }
+    }
   }
 };
 

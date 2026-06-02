@@ -21,14 +21,29 @@ const searchRelevantContent = async (req, res) => {
 };
 
 /**
- * Chat thông minh (RAG)
+ * Chat thông minh (RAG + Conversation History + Lesson Context)
  */
 const chatWithDocument = async (req, res) => {
     try {
-        const { question, planId } = req.body;
+        const { question, planId, history = [], lessonContent } = req.body;
         if (!question || !planId) return res.error("Vui lòng cung cấp câu hỏi và ID lộ trình", 400);
 
-        const result = await ragService.answerQuestionWithRAG(question, planId);
+        const safeHistory = Array.isArray(history)
+            ? history.filter(m => m?.role && m?.content).slice(-12)
+            : [];
+
+        // Cắt lessonContent an toàn (max 8000 ký tự)
+        const safeLessonContent = typeof lessonContent === 'string'
+            ? lessonContent.slice(0, 8000)
+            : null;
+
+        const result = await ragService.answerQuestionWithRAG(
+            question,
+            planId,
+            [],
+            safeHistory,
+            safeLessonContent
+        );
         return res.success(result);
     } catch (error) {
         console.error("AI Chat Error:", error.message);
