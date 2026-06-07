@@ -7,13 +7,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 "use strict";
 
-const Groq = require("groq-sdk");
-
 const Lesson   = require("../models/Lesson");
 const Chunk    = require("../models/Chunk");
 const Progress = require("../models/Progress");
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const { makeGroqRequest } = require("./planService");
 
 // ── Hằng số ──────────────────────────────────────────────────────────────────
 const POOL_SIZE = 30; // Số câu trong quizPool
@@ -78,17 +75,17 @@ const generateQuizPool = async (lessonId) => {
   let numQuestions, easyRatio, mediumRatio, hardRatio;
 
   if (focus === "practice" && depth === "deep") {
-    // Chế độ 4: Thực hành + Chuyên sâu: 20 câu khó, vận dụng bài toán cụ thể
+    // 4. Thực hành - Nâng cao: 20 câu, độ khó cao, liên quan nhiều đến thực hành, áp dụng lý thuyết
     numQuestions = 20; easyRatio = 0.05; mediumRatio = 0.25; hardRatio = 0.70;
   } else if (focus === "practice" && depth === "basic") {
-    // Chế độ 2: Thực hành + Cơ bản: 15 câu, độ khó vừa phải
-    numQuestions = 15; easyRatio = 0.20; mediumRatio = 0.55; hardRatio = 0.25;
+    // 3. Thực hành - Cơ bản: 20 câu, độ khó cơ bản, liên quan nhiều đến thực hành, áp dụng lý thuyết
+    numQuestions = 20; easyRatio = 0.30; mediumRatio = 0.50; hardRatio = 0.20;
   } else if (focus === "theory" && depth === "deep") {
-    // Chế độ 3: Lý thuyết + Chuyên sâu: 10 câu khó
-    numQuestions = 10; easyRatio = 0.10; mediumRatio = 0.20; hardRatio = 0.70;
+    // 2. Lý thuyết - Nâng cao: 10 câu, độ khó cao, liên quan nhiều đến lý thuyết
+    numQuestions = 10; easyRatio = 0.10; mediumRatio = 0.30; hardRatio = 0.60;
   } else {
-    // Chế độ 1 (mặc định): Lý thuyết + Cơ bản: 10 câu, nhiều câu dễ
-    numQuestions = 10; easyRatio = 0.50; mediumRatio = 0.35; hardRatio = 0.15;
+    // 1. Lý thuyết - Cơ bản: 10 câu, độ khó cơ bản, liên quan nhiều đến lý thuyết
+    numQuestions = 10; easyRatio = 0.60; mediumRatio = 0.30; hardRatio = 0.10;
   }
 
   console.log(`[QuizPool] Mode: Focus=${focus}, Depth=${depth} → ${numQuestions} câu | Easy=${easyRatio*100}% Med=${mediumRatio*100}% Hard=${hardRatio*100}%`);
@@ -108,17 +105,27 @@ const generateQuizPool = async (lessonId) => {
     depth
   );
 
-  const completion = await retryWithBackoff(() =>
-    groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
-      messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_object" },
-      temperature: 0.5,
-      max_tokens: 4000,
-    })
-  );
+  // Thiết lập temperature động dựa theo Focus & Depth để AI sáng tạo câu hỏi vận dụng khi cần
+  let temperature = 0.0;
+  if (focus === "practice" && depth === "deep") {
+    temperature = 0.5; // Chế độ thực hành chuyên sâu: cần tạo tình huống thực tế, code debug phức tạp
+  } else if (focus === "practice") {
+    temperature = 0.3; // Thực hành cơ bản: câu hỏi vận dụng đơn giản
+  } else if (depth === "deep") {
+    temperature = 0.3; // Lý thuyết chuyên sâu: so sánh nguyên lý, phân tích tình huống
+  }
 
-  const parsed    = JSON.parse(completion.choices[0].message.content);
+  console.log(`[QuizPool] Selected temperature: ${temperature}`);
+
+  // Sử dụng makeGroqRequest hỗ trợ xoay vòng API keys + fallback Gemini.
+  const resText = await makeGroqRequest({
+    messages: [{ role: "user", content: prompt }],
+    model: "llama-3.1-8b-instant",
+    temperature,
+    enforceJSON: true
+  });
+
+  const parsed    = JSON.parse(resText);
   const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
 
   await Lesson.findByIdAndUpdate(lessonId, { quizPool: questions });
@@ -137,8 +144,13 @@ const generateQuizPool = async (lessonId) => {
  * Tự động sinh pool nếu chưa đủ câu.
  */
 const selectQuestionsAdaptive = async (lessonId, userLevel = "INTERMEDIATE", numQuestions = 10) => {
-  const lesson = await Lesson.findById(lessonId).lean();
+  const lesson = await Lesson.findById(lessonId);
   if (!lesson) throw new Error("Không tìm thấy bài học");
+
+  // Nếu bài học đã được chọn sẵn quiz (lesson.quiz có dữ liệu), trả về luôn câu hỏi đã lưu
+  if (Array.isArray(lesson.quiz) && lesson.quiz.length >= Math.min(numQuestions, 3)) {
+    return lesson.quiz;
+  }
 
   const pool = lesson.quizPool || [];
   // KHÔNG tự generate ở đây để tránh double-call.
@@ -165,7 +177,13 @@ const selectQuestionsAdaptive = async (lessonId, userLevel = "INTERMEDIATE", num
     picked.push(..._shuffle(remaining).slice(0, numQuestions - picked.length));
   }
 
-  return _shuffle(picked).slice(0, numQuestions);
+  const finalQuestions = _shuffle(picked).slice(0, numQuestions);
+
+  // Lưu lại bộ quiz được chọn để cố định câu hỏi cho học viên
+  lesson.quiz = finalQuestions;
+  await lesson.save();
+
+  return finalQuestions;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -231,17 +249,16 @@ const _shuffle = (arr) => [...arr].sort(() => Math.random() - 0.5);
 const _buildQuizPoolPrompt = (lessonTitle, lessonSummary, context, numQuestions, easyRatio, mediumRatio, hardRatio, focus, depth) => {
   let focusInstruction;
   if (focus === "practice" && depth === "deep") {
-    focusInstruction = "TẬP TRUNG THỰC HÀNH CHUYÊN SÂU: Tạo câu hỏi dựa vào tình huống thực tế cụ thể (bài toán, đoạn code, debug), đòi hỏi phân tích nguyên nhân, so sánh giải pháp và vận dụng thành thạo.";
+    focusInstruction = "TẬP TRUNG THỰC HÀNH CHUYÊN SÂU: Tạo câu hỏi dựa vào tình huống thực tế cụ thể (case study thực tế, bài toán phân tích, đoạn code, chẩn đoán lỗi/vấn đề), đòi hỏi phân tích nguyên nhân cốt lõi, so sánh ưu/nhược điểm của các giải pháp và vận dụng kiến thức chuyên sâu.";
   } else if (focus === "practice") {
-    focusInstruction = "TẬP TRUNG THỰC HÀNH: Tạo câu hỏi kiểm tra khả năng sử dụng, vận dụng kiến thức vào bài toán đơn giản, nhận diện ứng dụng phù hợp.";
+    focusInstruction = "TẬP TRUNG THỰC HÀNH CƠ BẢN: Tạo câu hỏi kiểm tra khả năng áp dụng kiến thức vào bài toán/tình huống thực tiễn đơn giản, nhận diện ứng dụng phù hợp trong ngữ cảnh.";
   } else if (depth === "deep") {
-    focusInstruction = "TẬP TRUNG LÝ THUYẾT CHUYÊN SÂU: Tạo câu hỏi phân tích sâu về nguyên lý, so sánh khái niệm tương đồng, đánh giá tính đúng/sai trong điều kiện cụ thể.";
+    focusInstruction = "TẬP TRUNG LÝ THUYẾT CHUYÊN SÂU: Tạo câu hỏi so sánh đối chiếu khái niệm tương đồng, giải thích nguyên lý vận hành sâu xa, đánh giá tính đúng/sai dưới các ràng buộc hoặc điều kiện cụ thể.";
   } else {
-    focusInstruction = "TẬP TRUNG LÝ THUYẾT CƠ BẢN: Kiểm tra hiểu biết về định nghĩa, thuật ngữ, các đặc điểm và nguyên lý cần ghi nhớ.";
+    focusInstruction = "TẬP TRUNG LÝ THUYẾT CƠ BẢN: Kiểm tra sự hiểu biết về định nghĩa, thuật ngữ chuyên môn, các đặc điểm nhận biết cốt lõi và nguyên lý cơ bản cần ghi nhớ.";
   }
 
-  return `
-Bạn là chuyên gia khảo thí. Nhiệm vụ: Tạo ĐÚNG ${numQuestions} câu hỏi trắc nghiệm cho bài học sau.
+  return `Bạn là chuyên gia khảo thí và biên soạn câu hỏi trắc nghiệm khách quan. Nhiệm vụ của bạn là tạo đúng ${numQuestions} câu hỏi trắc nghiệm dựa TRÊN DUY NHẤT nội dung bài học được cung cấp dưới đây.
 
 === BÀI HỌC: "${lessonTitle}" ===
 Tóm tắt: ${lessonSummary}
@@ -249,26 +266,34 @@ Tóm tắt: ${lessonSummary}
 ${context}
 === KẾT THÚC NỘI DUNG ===
 
-YÊU CẦU BẮT BUỘC:
-1. Tạo CHÍNH XÁC ${numQuestions} câu - không ít hơn, không nhiều hơn
-2. Mỗi câu kiểm tra một khía cạnh KHÁC NHAU, không lặp lại concept
-3. Câu hỏi CHỈ dựa vào nội dung bài học, lọc ra các tiêu đề hoặc nội dung quan trọng nhất
-4. Mỗi câu có 4 đáp án: 1 đúng, 3 sai nhưng hợp lý
-5. ${focusInstruction}
+YÊU CẦU NGHIÊM NGẶT VỀ NỘI DUNG & CHẤT LƯỢNG (HẠN CHẾ HALLUCINATION & BẢO ĐẢM TÍNH ĐÚNG ĐẮN):
+1. CHỈ SỬ DỤNG thông tin được đề cập trực tiếp trong nội dung bài học ở trên. Không sử dụng kiến thức hoặc suy diễn bên ngoài.
+2. MỖI CÂU HỎI CHỈ ĐƯỢC PHÉP CÓ DUY NHẤT 1 ĐÁP ÁN ĐÚNG. 3 phương án còn lại bắt buộc phải là đáp án SAI hoàn toàn và không thể tranh cãi.
+3. TUYỆT ĐỐI KHÔNG sinh câu hỏi có nhiều hơn một đáp án đúng hoặc mập mờ về mặt ngữ nghĩa/kỹ thuật.
+4. Giá trị "correctAnswer" phải là số nguyên (0, 1, 2, hoặc 3) trỏ CHÍNH XÁC đến vị trí của đáp án đúng duy nhất trong mảng "options". Nghiêm cấm đặt sai lệch index của đáp án đúng.
+5. Giải thích ("explanation") phải ghi rõ lý do đáp án đó đúng và giải thích ngắn gọn vì sao 3 phương án còn lại sai dựa vào bài học.
+6. ${focusInstruction}
 
-PHÂN BỔ ĐỘ KHÓ (bắt buộc, tổng phải bằng ${numQuestions}):
-- ${Math.round(numQuestions * easyRatio)} câu DỄ (easy): Nhận biết / Ghi nhớ — định nghĩa, thuật ngữ
-- ${Math.round(numQuestions * mediumRatio)} câu TRUNG BÌNH (medium): Thông hiểu / Vận dụng
-- ${Math.round(numQuestions * hardRatio)} câu KHÓ (hard): Phân tích / Đánh giá tình huống
+QUY TRÌNH TỰ KIỂM TRA CHÉO (SELF-VERIFY):
+Trước khi trả về JSON, bạn phải duyệt qua từng câu hỏi trong danh sách:
+- Đọc lại nội dung câu hỏi.
+- Lấy đáp án tại vị trí options[correctAnswer] kiểm tra xem nó có đúng 100% không.
+- Kiểm tra xem 3 options còn lại có thực sự sai lệch 100% không.
+Nếu phát hiện lỗi logic hoặc lệch index, hãy sửa lại ngay lập tức trước khi xuất kết quả.
 
-Trả về JSON thuần túy:
+PHÂN BỔ SỐ LƯỢNG VÀ ĐỘ KHÓ (Tổng số câu hỏi phải bằng chính xác ${numQuestions}):
+- ${Math.round(numQuestions * easyRatio)} câu DỄ (easy): Nhận biết / Ghi nhớ định nghĩa, cú pháp hoặc thuật ngữ cụ thể.
+- ${Math.round(numQuestions * mediumRatio)} câu TRUNG BÌNH (medium): Thông hiểu / Vận dụng trực tiếp trong ngữ cảnh.
+- ${Math.round(numQuestions * hardRatio)} câu KHÓ (hard): Phân tích / Đánh giá tình huống hoặc giải quyết vấn đề.
+
+Trả về kết quả dưới dạng JSON thuần túy (không kèm markdown block ngoài JSON):
 {
   "questions": [
     {
-      "question": "Câu hỏi cụ thể?",
-      "options": ["Đáp án A", "Đáp án B", "Đáp án C", "Đáp án D"],
+      "question": "Nội dung câu hỏi trắc nghiệm?",
+      "options": ["Lựa chọn 1", "Lựa chọn 2", "Lựa chọn 3", "Lựa chọn 4"],
       "correctAnswer": 0,
-      "explanation": "Giải thích ngắn gọn",
+      "explanation": "Giải thích câu đúng dựa hoàn toàn trên bài học ở trên.",
       "difficulty": "easy|medium|hard",
       "bloomLevel": "Nhận biết|Thông hiểu|Vận dụng|Phân tích|Đánh giá"
     }

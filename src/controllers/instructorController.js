@@ -213,12 +213,13 @@ const saveLessonDraft = async (req, res) => {
     const newPlan = await Plan.create({
       title: `${sourcePlan.title} (Bản sao của GV)`,
       owner: req.user.id,
-      instructorId: null, // Không còn là khóa hướng dẫn nữa, đây là khóa của riêng GV
+      studentId: sourcePlan.studentId || sourcePlan.owner, // Đảm bảo giữ vết học viên gốc
+      instructorId: req.user.id, // Gán giáo viên hiện tại làm người hướng dẫn
       documentId: sourcePlan.documentId,
       duration: sourcePlan.duration,
       learningGoals: sourcePlan.learningGoals,
       documentMetadata: sourcePlan.documentMetadata,
-      sourceType: "self", // Đánh dấu là khóa tự biên soạn (enum hợp lệ: 'self')
+      sourceType: "assigned", 
       sharedWith: [],
       deletedByOwner: false,
       deletedByInstructor: false
@@ -297,8 +298,36 @@ const finalizeReview = async (req, res) => {
 
     await Promise.all(mergeOps);
 
-    // 3. Cập nhật trạng thái plan thành 'reviewed' và chuyển sourceType thành 'assigned' để hiển thị ở tab "Giáo viên gửi"
-    await Plan.findByIdAndUpdate(planId, { status: 'reviewed', sourceType: 'assigned' });
+    // 3. Cập nhật trạng thái plan và chuyển giao quyền sở hữu lại cho học viên gốc nếu giáo viên đang là owner
+    const plan = await Plan.findById(planId);
+    if (!plan) return res.error("Không tìm thấy lộ trình", 404);
+
+    const targetStudentId = plan.studentId || plan.owner;
+
+    plan.status = 'reviewed';
+    plan.sourceType = 'assigned';
+    
+    // Nếu giáo viên đang sở hữu (bản clone mới từ saveLessonDraft) -> bàn giao lại cho học viên gốc
+    if (plan.owner.toString() !== targetStudentId.toString()) {
+      plan.owner = targetStudentId;
+      plan.instructorId = req.user.id;
+    }
+
+    await plan.save();
+
+    // 4. Đồng bộ hóa hoặc tạo mới Enrollment cho học viên đối với lộ trình được duyệt
+    let enrollment = await Enrollment.findOne({ learnerId: targetStudentId, planId: plan._id });
+    if (!enrollment) {
+      await Enrollment.create({
+        learnerId: targetStudentId,
+        instructorId: req.user.id,
+        planId: plan._id,
+        status: "active"
+      });
+    } else if (enrollment.status !== "active") {
+      enrollment.status = "active";
+      await enrollment.save();
+    }
 
     return res.success(null, "Đã gửi bản chỉnh sửa hoàn chỉnh cho học viên.");
   } catch (error) {

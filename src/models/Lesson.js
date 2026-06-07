@@ -44,6 +44,21 @@ const lessonSchema = new mongoose.Schema({
     // Mảng quiz cũ (hỗ trợ tương thích ngược)
     quiz: [mongoose.Schema.Types.Mixed],
 
+    // ── LAZY QUIZ GENERATION ────────────────────────────────────────────────
+    // Quiz không được tạo ngay khi tạo khóa học (để giảm thời gian tạo ~40-50%).
+    // Thay vào đó quiz sẽ được sinh ON-DEMAND khi học viên lần đầu mở bài học.
+    // Trạng thái:
+    //   'pending'    → Chưa tạo quiz (mặc định khi bài học mới được sinh ra)
+    //   'generating' → Đang tạo quiz (tránh gọi API trùng lặp)
+    //   'ready'      → Quiz đã được tạo và lưu vào trường quiz[]
+    quizStatus: {
+      type: String,
+      enum: ['pending', 'generating', 'ready'],
+      default: 'pending',
+    },
+    // ────────────────────────────────────────────────────────────────────────
+
+
     // ── HỌC TẬP THÍCH ỨNG (Adaptive Learning) ───────────────────
     // Ngân hàng câu hỏi trắc nghiệm lớn (20-30 câu). AI sẽ tự động chọn lọc câu hỏi
     // phù hợp nhất với trình độ thực tế của người học để hiển thị làm bài test.

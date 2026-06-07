@@ -76,24 +76,20 @@ const submitAdaptive = async (req, res) => {
       return res.error("Thiếu planId, dayNumber hoặc answers", 400);
     }
 
-    const lesson = await Lesson.findById(lessonId).lean();
+    const lesson = await Lesson.findById(lessonId);
     if (!lesson) return res.error("Không tìm thấy bài học", 404);
 
-    // ── Lấy quiz pool (có fallback tự sinh) ──────────────────────────────────
-    let pool = lesson.quizPool || [];
+    // ── Lấy pool để chấm điểm (Ưu tiên bộ quiz thích ứng đã lưu trong lesson.quiz) ──
+    let pool = (Array.isArray(lesson.quiz) && lesson.quiz.length > 0) ? lesson.quiz : (lesson.quizPool || []);
 
     if (pool.length === 0) {
       console.log(`[submitAdaptive] Pool rỗng → tự sinh cho lesson ${lessonId}`);
       try {
-        pool = await lessonQuizService.generateQuizPool(lessonId);
+        const generatedPool = await lessonQuizService.generateQuizPool(lessonId);
+        pool = generatedPool;
       } catch (genErr) {
         console.warn("[submitAdaptive] generateQuizPool thất bại:", genErr.message);
       }
-    }
-
-    // Fallback sang quiz cũ nếu vẫn không có pool
-    if (pool.length === 0 && lesson.quiz?.length > 0) {
-      pool = lesson.quiz;
     }
 
     if (pool.length === 0) {

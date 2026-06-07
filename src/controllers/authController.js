@@ -130,6 +130,9 @@ const refreshToken = async (req, res) => {
 /**
  * 4. LẤY THÔNG TIN CÁ NHÂN (Get Me)
  */
+// Luồng chạy: Nhận yêu cầu có kèm Access Token 
+// -> Middleware verifyToken giải mã và gắn user ID vào req.user.id
+// -> Controller dùng ID này để truy vấn thông tin người dùng trong DB và trả về cho Frontend
 const getMe = async (req, res) => {
     try {
         const user = await User.findById(req.user.id).select("-password -refreshToken");
@@ -142,14 +145,23 @@ const getMe = async (req, res) => {
 /**
  * 5. CẬP NHẬT HỒ SƠ
  */
+// Luồng chạy: Nhận Body -> Tìm User -> Cập nhật thông tin -> Lưu DB -> Trả về kết quả
+// Lưu ý: Người dùng chỉ có thể cập nhật họ tên và thông tin giảng viên (nếu có),
+//  không được phép thay đổi email hoặc vai trò trong chức năng này.
 const updateProfile = async (req, res) => {
     try {
+        // Lấy họ tên mới và thông tin giảng viên từ body gửi lên
         const { fullName, instructorProfile } = req.body;
         
+        // Tìm và cập nhật thông tin người dùng dựa vào ID đã được 
+        // middleware verifyToken gắn vào req.user.id
         const user = await User.findByIdAndUpdate(
             req.user.id,
             { fullName, instructorProfile },
             { new: true }
+            // Sau khi cập nhật xong, trả về thông tin user mới nhất 
+            // (đã loại bỏ trường password và refreshToken) 
+            // để frontend cập nhật giao diện
         ).select("-password -refreshToken");
 
         return res.success(user, "Cập nhật hồ sơ thành công.");
@@ -160,16 +172,24 @@ const updateProfile = async (req, res) => {
 
 /**
  * 6. ĐỔI MẬT KHẨU
+ * 
  */
+// Luồng chạy: Nhận Body -> Tìm User -> So sánh mật khẩu cũ -> Gán mật khẩu mới 
+// -> Lưu DB (Pre-save Hook sẽ hash tự động)
+// Lưu ý: Người dùng phải cung cấp đúng mật khẩu cũ mới được phép đổi sang mật khẩu mới.
 const changePassword = async (req, res) => {
     try {
+        //lấy mật khẩu cũ và mới từ body
         const { oldPassword, newPassword } = req.body;
+        //tìm user hiện tại trong DB dựa vào ID đã được middleware verifyToken gắn vào req.user.id
         const user = await User.findById(req.user.id);
-
+//so sánh mật khẩu cũ nhập vào với mật khẩu đã được băm lưu trong DB
         const isMatch = await bcrypt.compare(oldPassword, user.password);
+        //nếu không khớp, trả về lỗi
         if (!isMatch) return res.status(400).json({ success: false, message: "Mật khẩu cũ không đúng." });
-
+//nếu khớp, gán mật khẩu mới cho user.password (sẽ được tự động hash bởi pre-save hook trong model) và lưu lại
         user.password = newPassword; // Sẽ được tự động hash bởi pre-save hook trong model
+        // Lưu lại user với mật khẩu mới đã được hash
         await user.save();
 
         return res.success(null, "Đổi mật khẩu thành công.");
@@ -193,6 +213,14 @@ const getInstructors = async (req, res) => {
     return res.error(error.message, 500);
   }
 };
+
+//8. TÌM KIẾM NGƯỜI DÙNG THEO EMAIL HOẶC HỌ TÊN 
+// (Dành cho Admin hoặc Instructor muốn tìm học viên hoặc đồng nghiệp)
+// Luồng chạy: Nhận query param -> Chuẩn hóa -> Tìm kiếm trong DB -> Trả kết quả
+// Lưu ý: Tìm kiếm sẽ khớp chính xác email hoặc họ tên (không phân biệt hoa thường)
+// Ví dụ: /api/auth/search?email=nguyen van a 
+// -> sẽ tìm kiếm người dùng có email hoặc fullName trùng khớp "nguyen van a"
+// SỬA LẠI: Tìm kiếm hoặc là khớp Email, hoặc là khớp Họ tên (không phân biệt hoa thường)
 const searchUser = async (req, res) => {
   try {
     const { email } = req.query; // email này là chuỗi người dùng nhập vào ô search

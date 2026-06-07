@@ -1,8 +1,25 @@
 {
   "fileName": "CÆ¡ sá» dá»¯ liá»u nÃ¢ng cao 1.docx",
   "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "wordCount": 2432,
+  "wordCount": 3071,
   "lineCount": 198,
-  "tableCount": 1,
-  "extractMethod": "mammoth"
+  "tableCount": 8,
+  "extractMethod": "docling",
+  "pages": 0,
+  "headingCount": 21,
+  "hasFormulas": true,
+  "codeBlockCount": 0,
+  "bulletItemCount": 1,
+  "estimatedComplexity": "high",
+  "qualityIssues": [
+    "no_headings"
+  ],
+  "qualityStats": {
+    "words": 3009,
+    "headingCount": 1,
+    "shortRatio": 9,
+    "viRatio": 7.1,
+    "gluedRatio": 3,
+    "isSlidePdf": false
+  }
 }

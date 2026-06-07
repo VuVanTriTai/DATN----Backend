@@ -13,9 +13,12 @@
 //      chunk so RAG context is maintained
 // ─────────────────────────────────────────────────────────────────
 
-const MAX_CHUNK_WORDS  = 350;   // hard ceiling before we sub-split
-const MIN_CHUNK_WORDS  = 40;    // discard noise chunks below this
-const OVERLAP_HEADING  = true;  // prepend section heading to every sub-chunk
+const MAX_CHUNK_WORDS = 350;   // hard ceiling before we sub-split
+const MIN_CHUNK_WORDS = 40;    // discard noise chunks below this
+const MIN_CHUNK_WORDS_NUMBERED = 15; // Số từ tối thiểu cho chunk tiêu đề (1.1, 1.2,...)
+const OVERLAP_HEADING = true;  // prepend section heading to every sub-chunk
+
+
 
 // ─────────────────────────────────────────────
 // PDF / DOC: numbered heading split across two lines ("1.1" + "Tiêu đề")
@@ -26,13 +29,12 @@ const isNumberOnlyHeadingLine = (s) => /^\d+(\.\d+)+\s*$/.test(String(s || "").t
 const mergeNextLineUnsafe = (nextLine) => {
   const t = String(nextLine || "").trim();
   if (!t) return true;
-  if (/^```|^\|/.test(t)) return true;
-  if (/^#{1,6}\s/.test(t)) return true;
-  if (/^[-*+]\s/.test(t)) return true;
-  if (/^\d+\.\s/.test(t)) return true;
-  if (/^(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DECLARE|WITH|FROM|WHERE|USE|GO)\b/i.test(t)) {
-    return true;
-  }
+  if (/^```|^\|/.test(t)) return true;  // code fence hoặc table
+  if (/^#{1,6}\s/.test(t)) return true; // markdown heading khác
+  if (/^[-*+]\s/.test(t)) return true;  // bullet list
+  if (/^\d+\.\s/.test(t)) return true;  // numbered list
+  // Dòng bắt đầu bằng dấu đặc biệt (operator, paren, ...) → không phải title
+  if (/^[=+\-*/(){}[\]|;,@#$^&<>]/.test(t)) return true;
   return false;
 };
 
@@ -114,10 +116,10 @@ const headingLevel = (line) => {
  * Classify a line for safe-split-point detection.
  */
 const lineKind = (line) => {
-  if (!line.trim())                       return "blank";
-  if (/^\s*```/.test(line))               return "fence";   // code fence
-  if (/^\s*\|/.test(line))               return "table";
-  if (/^#{1,6}\s/.test(line.trim()))     return "heading";
+  if (!line.trim()) return "blank";
+  if (/^\s*```/.test(line)) return "fence";   // code fence
+  if (/^\s*\|/.test(line)) return "table";
+  if (/^#{1,6}\s/.test(line.trim())) return "heading";
   if (/^[\s]*[-*+]\s|^\s*\d+\.\s/.test(line)) return "list";
   return "text";
 };
@@ -128,11 +130,11 @@ const lineKind = (line) => {
  * Cuts only at blank lines when accumulated words >= MAX_CHUNK_WORDS * 0.7.
  */
 const splitSection = (sectionHeading, lines) => {
-  const results   = [];
-  let buffer      = sectionHeading ? [sectionHeading, ""] : [];
-  let words       = 0;
-  let inFence     = false;
-  let inTable     = false;
+  const results = [];
+  let buffer = sectionHeading ? [sectionHeading, ""] : [];
+  let words = 0;
+  let inFence = false;
+  let inTable = false;
 
   const flushBuffer = () => {
     const content = buffer.join("\n").trim();
@@ -141,7 +143,7 @@ const splitSection = (sectionHeading, lines) => {
 
     // Overlap: keep heading for next sub-chunk
     buffer = sectionHeading && OVERLAP_HEADING ? [sectionHeading, ""] : [];
-    words  = buffer.join(" ").split(/\s+/).filter(Boolean).length;
+    words = buffer.join(" ").split(/\s+/).filter(Boolean).length;
   };
 
   for (const line of lines) {
@@ -151,17 +153,17 @@ const splitSection = (sectionHeading, lines) => {
     if (kind === "fence") inFence = !inFence;
 
     // Track table rows — a blank line ends the table
-    if (kind === "table")  inTable = true;
-    if (kind === "blank")  inTable = false;
+    if (kind === "table") inTable = true;
+    if (kind === "blank") inTable = false;
 
     const lineWords = line.split(/\s+/).filter(Boolean).length;
 
     // Only consider splitting at blank lines, and only when we're not
     // inside a protected block
     if (
-      kind === "blank"      &&
-      !inFence              &&
-      !inTable              &&
+      kind === "blank" &&
+      !inFence &&
+      !inTable &&
       words >= MAX_CHUNK_WORDS * 0.7
     ) {
       flushBuffer();
@@ -199,8 +201,8 @@ const chunkText = (text) => {
 
   text = mergeBrokenNumberedHeadings(text);
 
-  const lines   = text.split("\n");
-  const chunks  = [];
+  const lines = text.split("\n");
+  const chunks = [];
 
   // ── Pass 1: split into sections at heading boundaries ──
   const sections = []; // { heading: string|null, lines: string[] }
@@ -221,13 +223,13 @@ const chunkText = (text) => {
   }
 
   // ── Pass 2: each section → one or more chunks ──
+  // ── Pass 2: each section → one or more chunks ──
   let chunkIndex = 0;
 
   for (const section of sections) {
     const headerLine = section.heading || null;
-    const bodyLines  = section.lines;
+    const bodyLines = section.lines;
 
-    // Word count of section body
     const bodyWords = bodyLines
       .join(" ")
       .split(/\s+/)
@@ -239,31 +241,35 @@ const chunkText = (text) => {
 
     const totalWords = bodyWords + headerWords;
 
-    if (totalWords < MIN_CHUNK_WORDS) continue; // skip near-empty sections
+    // FIX: Section có số mục X.Y (slide content ngắn) dùng ngưỡng thấp hơn
+    // Tránh drop các mục như "1.3 Cú pháp", "2.6 Save Point" chỉ có vài bullet
+    // Tài liệu phi số (văn xuôi, tự nhiên) vẫn dùng MIN_CHUNK_WORDS = 40
+    const isNumberedSection = headerLine && /^\d+\.\d+/.test(headerLine.trim());
+    const minWords = isNumberedSection ? MIN_CHUNK_WORDS_NUMBERED : MIN_CHUNK_WORDS;
+
+    if (totalWords < minWords) continue; // skip near-empty sections
 
     if (totalWords <= MAX_CHUNK_WORDS) {
-      // Section fits in one chunk — keep it whole
       const content = headerLine
         ? [headerLine, ...bodyLines].join("\n").trim()
         : bodyLines.join("\n").trim();
 
       const wc = content.split(/\s+/).filter(Boolean).length;
-      if (wc >= MIN_CHUNK_WORDS) {
+      if (wc >= minWords) { // FIX: dùng minWords thay vì MIN_CHUNK_WORDS cứng
         chunks.push({
-          index    : chunkIndex++,
-          section  : headerLine || "",
+          index: chunkIndex++,
+          section: headerLine || "",
           content,
           wordCount: wc,
         });
       }
     } else {
-      // Section is too long — sub-split at safe break points
       const subChunks = splitSection(headerLine, bodyLines);
       for (const sc of subChunks) {
         chunks.push({
-          index    : chunkIndex++,
-          section  : headerLine || "",
-          content  : sc.content,
+          index: chunkIndex++,
+          section: headerLine || "",
+          content: sc.content,
           wordCount: sc.wordCount,
         });
       }
@@ -277,4 +283,75 @@ const chunkText = (text) => {
   return chunks;
 };
 
-module.exports = { chunkText, mergeBrokenNumberedHeadings };
+/**
+ * Tách một Parent Chunk thành các propositions (child chunks) độc lập, tự chứa nghĩa.
+ *
+ * Chiến lược (Heuristic & Rule-based):
+ * 1. Làm sạch: Loại bỏ code blocks lớn (```...```) vì vector search trên code block thô ít hiệu quả.
+ * 2. Tách câu: Tách theo dấu chấm kết thúc câu (. hoặc ? hoặc ! hoặc xuống dòng),
+ *    bảo vệ dấu chấm trong số thập phân (ví dụ: 1.1, 3.14) hoặc từ viết tắt phổ biến (v.v, e.g).
+ * 3. Prepend Context: Gắn Section Title vào đầu mỗi proposition để giải quyết hiện tượng đại từ mơ hồ
+ *    (vd: "Nó giúp tăng hiệu năng" -> "1.1 Stored Procedure: Nó giúp tăng hiệu năng").
+ * 4. Filter: Chỉ giữ lại các proposition từ 8 đến 80 từ (tránh vụn vặt hoặc quá dài).
+ */
+const splitIntoPropositions = (parentChunk) => {
+  if (!parentChunk || !parentChunk.content) return [];
+
+  const section = parentChunk.section ? parentChunk.section.trim() : "";
+  let text = parentChunk.content;
+
+  // 1. Loại bỏ code block lớn ra khỏi proposition
+  text = text.replace(/```[\s\S]*?```/g, "");
+
+  // 2. Tách thành các dòng và lọc các dòng trống/quá ngắn
+  const rawLines = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.length > 5);
+
+  const sentences = [];
+
+  for (const line of rawLines) {
+    // Nếu dòng là header chính nó thì bỏ qua không tách tiếp
+    if (line.startsWith("#") || line === section) continue;
+
+    // Tách câu sử dụng regex thông minh: dấu chấm kết thúc câu phải đứng sau một chữ cái và trước một khoảng trắng/cuối dòng
+    // Tránh split "1.1", "3.14", "e.g.", "v.v."
+    const parts = line.split(/(?<=[A-ZÀ-Ỹa-zà-ỹđĐ]{2,})[.!?](?=\s|$)/);
+    for (let part of parts) {
+      part = part.trim();
+      // Loại bỏ các ký tự Markdown đầu dòng thường gặp
+      part = part.replace(/^[-*+]\s+/, "").replace(/^\d+\.\s+/, "").trim();
+      if (part.length > 15) {
+        sentences.push(part);
+      }
+    }
+  }
+
+  const propositions = [];
+  const cleanSection = section.replace(/^#+\s*/, "").trim();
+
+  for (const sentence of sentences) {
+    const wordCount = sentence.split(/\s+/).filter(Boolean).length;
+    // Bỏ qua các câu quá ngắn (nhiễu) hoặc quá dài (chưa tách hết)
+    if (wordCount >= 6 && wordCount <= 75) {
+      // Prepend section title để làm giàu ngữ cảnh
+      const content = cleanSection
+        ? `${cleanSection}: ${sentence}`
+        : sentence;
+
+      propositions.push({
+        content,
+        wordCount: content.split(/\s+/).filter(Boolean).length
+      });
+    }
+  }
+
+  return propositions;
+};
+
+module.exports = {
+  chunkText,
+  mergeBrokenNumberedHeadings,
+  splitIntoPropositions
+};

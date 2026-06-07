@@ -49,6 +49,20 @@ const chunkSchema = new mongoose.Schema(
       required: true,
     },
 
+    // ── Parent-Child RAG fields ──────────────────────────────────
+    isChild: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    parentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Chunk",
+      default: null,
+      index: true,
+    },
+
     // ── Vector ───────────────────────────────────────────────────
     embedding: {
       type    : [Number],

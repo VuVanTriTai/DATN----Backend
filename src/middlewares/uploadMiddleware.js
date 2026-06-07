@@ -50,6 +50,18 @@ const multerLocal = multer({
 
 const uploadLocal = multerLocal;
 
+const cleanupTempFiles = (files = []) => {
+  const uniqueFiles = [...new Set(files.filter(Boolean))];
+  for (const tempFile of uniqueFiles) {
+    if (!fs.existsSync(tempFile)) continue;
+    try {
+      fs.unlinkSync(tempFile);
+    } catch (err) {
+      console.warn(`[Upload] Cannot cleanup temp file ${tempFile}:`, err.message);
+    }
+  }
+};
+
 // Helper to zip file
 const zipFile = (sourcePath, destPath, fileNameInZip) => {
   return new Promise((resolve, reject) => {
@@ -74,11 +86,15 @@ const upload = {
         if (err) return next(err);
         if (!req.file) return next();
 
+        let tempFilesToCleanup = [];
         try {
           let filePathToUpload = req.file.path;
           const originalSize = req.file.size;
+          const originalName = req.file.originalname;
+          const originalMimeType = req.file.mimetype;
+          const originalLocalPath = req.file.path;
           let resourceType = 'raw';
-          let tempFilesToCleanup = [req.file.path];
+          tempFilesToCleanup = [req.file.path];
 
           // Check size > 10MB
           if (originalSize > 10 * 1024 * 1024) {
@@ -87,8 +103,6 @@ const upload = {
             await zipFile(filePathToUpload, zippedPath, req.file.originalname);
             filePathToUpload = zippedPath;
             tempFilesToCleanup.push(zippedPath);
-            req.file.originalname = req.file.originalname + '.zip'; // update name
-            req.file.mimetype = 'application/zip';
           }
 
           // Step 2: Upload to Cloudinary
@@ -104,20 +118,19 @@ const upload = {
           req.file.path = result.secure_url;
           req.file.location = result.secure_url; // Some controllers use location
           req.file.cloudinaryId = result.public_id;
-          
-          // Cleanup local files
-          for (const tempFile of tempFilesToCleanup) {
-            if (fs.existsSync(tempFile)) {
-              fs.unlinkSync(tempFile);
-            }
-          }
+          req.file.localPath = originalLocalPath;
+          req.file.originalname = originalName;
+          req.file.mimetype = originalMimeType;
+
+          res.once('finish', () => cleanupTempFiles(tempFilesToCleanup));
+          res.once('close', () => cleanupTempFiles(tempFilesToCleanup));
 
           console.log(`[Upload] Upload successful: ${result.secure_url}`);
           next();
         } catch (uploadErr) {
           console.error("[Upload] Cloudinary upload error:", uploadErr);
           // Cleanup
-          if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+          cleanupTempFiles(tempFilesToCleanup.length ? tempFilesToCleanup : [req.file?.path]);
           return res.status(500).json({ success: false, message: "File upload failed", error: uploadErr.message });
         }
       });

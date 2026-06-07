@@ -26,9 +26,6 @@ const User = require('../models/User');           // Thông tin người dùng
 // ✅ FIX: Đã chuyển require('crypto') từ trong function body lên đầu file theo chuẩn Node.js
 const crypto = require('crypto');
 
-// ⚠️ FIX đã xóa: Import GROQ_KEY_COUNT từ planService (biến này không được export từ planService)
-// const { GROQ_KEY_COUNT } = require('../services/planService'); // ← điều này gây ra undefined!
-
 // ────────────────────────────────────────────────────────────
 // PARALLEL LESSON GENERATOR
 // Sinh nhiều ngày học song song, mỗi key xử lý 1 batch để tránh RPM
@@ -93,7 +90,9 @@ const generateLessonsParallel = async ({
       // Nếu trùng khớp → nhân bản (clone) thay vì gọi AI → tiết kiệm thời gian & tiền API.
       let reused = null;
       try {
+
         reused = await lessonReuseService.findReusableLesson(
+
           learnerId, currentItem.topic, currentItem.objective,
           { currentPlanId: plan._id }
         );
@@ -184,6 +183,8 @@ const generateLessonsParallel = async ({
         day: currentItem.day,
         title: currentItem.topic,
         summary: detail.summary || currentItem.objective,
+        // ← MỚI: snippet nội dung 300 từ đầu để anti-dup ngày sau so sánh chính xác hơn
+        contentSnippet: (detail.content || "").split(/\s+/).slice(0, 300).join(" "),
       });
 
       if (currentItem.day < duration) await new Promise(r => setTimeout(r, 3000));
@@ -210,8 +211,10 @@ const generateLessonsParallel = async ({
 
 
 const DAYS_MIN = 1;
-const DAYS_MAX = 14;
+const DAYS_MAX = 30; // Tăng giới hạn tối đa lên 30 ngày
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const COURSE_LESSON_DELAY_MS = Number(process.env.COURSE_LESSON_DELAY_MS || 3000);
+const VECTOR_INDEX_WAIT_MS = Number(process.env.VECTOR_INDEX_WAIT_MS || 5000); // Tăng lên 5s để đảm bảo vector index xong
 // ─────────────────────────────────────────────
 // UPLOAD & EXTRACT (HARDENED)
 // ─────────────────────────────────────────────
@@ -442,6 +445,7 @@ const finalizeCreateCourse = async (req, res) => {
 
     // BƯỚC 1: KIỂM TRA CHẤT LƯỢNG TÀI LIỆU (Validate quality, rác chữ, OCR lỗi)
     let validationWarnings = [];
+    let validationAdvisories = [];   // ← MỚI: gợi ý về focus/depth (không phải lỗi)
     let depthGapWarning = null;
     try {
       const { validateDocument } = require('../services/docValidationService');
@@ -450,8 +454,15 @@ const finalizeCreateCourse = async (req, res) => {
         depth: learningGoals.depth || 'basic'
       });
 
-      console.log('📋 Doc validation:', valResult.level, '| issues:', valResult.issues.length);
+      console.log(
+        '📋 Doc validation:', valResult.level,
+        '| issues:', valResult.issues.length,
+        '| advisories:', (valResult.advisories || []).length,
+        '| domain:', valResult.aiResult?.detectedDomain || '?',
+        '| docType:', valResult.metrics?.docType || '?'
+      );
 
+      // Tài liệu không đạt → trả về lỗi (chỉ khi thực sự có vấn đề chất lượng)
       if (!valResult.passed) {
         return res.status(400).json({
           success: false,
@@ -462,11 +473,13 @@ const finalizeCreateCourse = async (req, res) => {
         });
       }
 
-      validationWarnings = valResult.issues;
+      validationWarnings = valResult.issues;                 // cảnh báo chất lượng (warn level)
+      validationAdvisories = valResult.advisories || [];      // gợi ý focus/depth (không phải lỗi)
       depthGapWarning = valResult.depthGapWarning;
     } catch (valErr) {
       console.warn('⚠️ Doc validation service lỗi, bỏ qua:', valErr.message);
     }
+
 
     // BƯỚC 2: HASH MD5 TÀI LIỆU (Chống trùng lặp tài liệu gốc trong Database)
     const hash = crypto.createHash("md5").update(extractedText).digest("hex");
@@ -539,8 +552,8 @@ const finalizeCreateCourse = async (req, res) => {
     console.log("📦 Chunk + embedding...");
     await planService.processAndStoreDocument(plan._id, extractedText);
 
-    console.log("⏳ Đợi index (5s)...");
-    await sleep(5000);
+    console.log("⏳ Đợi index (1s)...");
+    await sleep(1000);
 
     // BƯỚC 7: XÂY DỰNG KHUNG CHƯƠNG TRÌNH HỌC (GENERATE SYLLABUS)
     // Nếu người dùng chọn dùng luôn đề xuất ban đầu (previewPlan), hệ thống sẽ giữ nguyên.
@@ -580,7 +593,8 @@ const finalizeCreateCourse = async (req, res) => {
       data: {
         _id: plan._id,
         metadata,
-        validationWarnings: validationWarnings || [],
+        validationWarnings: validationWarnings || [],   // cảnh báo chất lượng
+        validationAdvisories: validationAdvisories || [],  // ← MỚI: gợi ý focus/depth
         depthGapWarning: depthGapWarning || null,
       }
     });
@@ -789,6 +803,7 @@ const updateInstructor = async (req, res) => {
 
     const clonedPlan = new Plan({
       ...planData,
+      studentId: userId,       // Lưu vết học viên gốc
       instructorId: instructorId,
       status: "teaching",     // Đang chờ giáo viên duyệt
       sourceType: "assigned", // Sẽ vào tab "Giáo viên gửi" khi duyệt xong
@@ -820,8 +835,8 @@ const updateInstructor = async (req, res) => {
       status: "active", // Đặt active luôn để hiện trong danh sách học viên của giáo viên
     });
 
-    // 5. Cập nhật ID giáo viên vào lộ trình gốc để học viên biết là đã gửi
-    await Plan.findByIdAndUpdate(id, { instructorId });
+    // 5. Cập nhật ID giáo viên và học viên gốc vào lộ trình gốc để học viên biết là đã gửi
+    await Plan.findByIdAndUpdate(id, { instructorId, studentId: userId });
 
     return res.success(clonedPlan, "Đã gửi bản sao lộ trình cho người hướng dẫn.");
 
@@ -842,8 +857,8 @@ const shareToMarket = async (req, res) => {
     );
 
     const plan = await Plan.findOneAndUpdate(
-      { 
-        _id: id, 
+      {
+        _id: id,
         $or: [
           { owner: req.user.id },
           { instructorId: req.user.id }

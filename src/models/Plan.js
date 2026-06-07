@@ -10,8 +10,11 @@ const planSchema = new mongoose.Schema({
   title: { type: String, required: true },
   topic: String,
 
-  // 👤 Chủ sở hữu: Học viên đã tạo ra lộ trình này
+  // 👤 Chủ sở hữu: Học viên đã tạo ra lộ trình này hoặc giáo viên sở hữu bản clone
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+
+  // 🎓 Học viên gốc (tác giả ban đầu của lộ trình học, dùng để xác định người nhận khi giáo viên gửi lại khóa học)
+  studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
   // 👨‍🏫 Giáo viên hướng dẫn (Học viên chọn khi tạo)
   instructorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

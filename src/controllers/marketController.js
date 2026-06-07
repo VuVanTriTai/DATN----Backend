@@ -1,6 +1,10 @@
 const Plan = require("../models/Plan");
 const Lesson = require("../models/Lesson");
 const User = require("../models/User");
+const Chunk = require("../models/Chunk");
+const Enrollment = require("../models/Enrollment");
+const Assignment = require("../models/Assignment");
+const Progress = require("../models/Progress");
 
 // 1. Xem khái quát tiêu đề các ngày
 const getCoursePreview = async (req, res) => {
@@ -34,6 +38,7 @@ const importCourse = async (req, res) => {
       title: sourcePlan.title,
       topic: sourcePlan.topic,
       owner: userId,
+      instructorId: sourcePlan.instructorId || null,
       duration: sourcePlan.duration,
       level: sourcePlan.level,
       learningFocus: sourcePlan.learningFocus,
@@ -114,6 +119,7 @@ const getMarketCourses = async (req, res) => {
 
     const courses = await Plan.find(query)
       .populate("owner", "fullName email")
+      .populate("instructorId", "fullName email")
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -144,6 +150,7 @@ const getCoursesByInstructor = async (req, res) => {
       isDeleted: false,
     })
       .populate("owner", "fullName email")
+      .populate("instructorId", "fullName email")
       .sort({ createdAt: -1 })
       .lean();
     return res.success(courses);
@@ -160,7 +167,10 @@ const getMyListings = async (req, res) => {
   try {
     const userId = req.user.id;
     const courses = await Plan.find({
-      owner: userId,
+      $or: [
+        { owner: userId },
+        { instructorId: userId }
+      ],
       isPublic: true,
       isDeleted: false,
     })
@@ -208,6 +218,21 @@ const unlistCourse = async (req, res) => {
 
     plan.isPublic = false;
     await plan.save();
+
+    // ⚠️ Nếu khóa học đã được đánh dấu xóa ở dashboard (deletedByOwner hoặc deletedByInstructor)
+    // thì khi unlist khỏi Market, tiến hành dọn dẹp xóa cứng vì không còn được hiển thị ở đâu nữa.
+    const shouldHardDelete = plan.deletedByOwner && (!plan.instructorId || plan.deletedByInstructor);
+    if (shouldHardDelete) {
+      console.log(`🗑️ Khóa học đã unlist và trước đó đã bị xóa ở dashboard. Tiến hành xóa cứng: ${id}`);
+      await Promise.all([
+        Lesson.deleteMany({ planId: id }),
+        Chunk.deleteMany({ planId: id }),
+        Enrollment.deleteMany({ planId: id }),
+        Assignment.deleteMany({ planId: id }),
+        Progress.deleteMany({ planId: id }),
+      ]);
+      await Plan.findByIdAndDelete(id);
+    }
 
     return res.success(null, "Đã gỡ khóa học khỏi Market thành công.");
   } catch (error) {
