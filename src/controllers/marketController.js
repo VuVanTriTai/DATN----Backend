@@ -13,7 +13,7 @@ const getCoursePreview = async (req, res) => {
     const lessons = await Lesson.find({ planId: id, isDeleted: false })
       .select("dayNumber title summary") // Chỉ lấy tiêu đề và tóm tắt, không lấy content/quiz
       .sort({ dayNumber: 1 });
-    
+
     return res.success(lessons);
   } catch (error) {
     return res.error(error.message, 500);
@@ -88,7 +88,7 @@ const importCourse = async (req, res) => {
 const getMarketCourses = async (req, res) => {
   try {
     const { search, category, level, page = 1, limit = 12, instructorSearch } = req.query;
-    
+
     // Chỉ lấy những khóa học đã được bật isPublic
     const query = { isPublic: true, isDeleted: false };
 
@@ -111,7 +111,7 @@ const getMarketCourses = async (req, res) => {
       const matchedInstructors = await User.find({
         $or: [
           { fullName: { $regex: instructorSearch.trim(), $options: "i" } },
-          { email:    { $regex: instructorSearch.trim(), $options: "i" } },
+          { email: { $regex: instructorSearch.trim(), $options: "i" } },
         ],
       }).select("_id");
       query.owner = { $in: matchedInstructors.map(u => u._id) };
@@ -205,13 +205,13 @@ const unlistCourse = async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    const plan = await Plan.findOne({ 
-      _id: id, 
+    const plan = await Plan.findOne({
+      _id: id,
       $or: [
         { owner: userId },
         { instructorId: userId }
-      ], 
-      isDeleted: false 
+      ],
+      isDeleted: false
     });
     if (!plan) return res.error("Không tìm thấy khóa học hoặc bạn không có quyền.", 404);
     if (!plan.isPublic) return res.error("Khóa học này chưa được đưa lên Market.", 400);

@@ -140,3 +140,7 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 uploads/
+
+# Debug files
+src/debug/*.json
+src/debug/*.txt

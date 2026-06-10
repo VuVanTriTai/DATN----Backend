@@ -55,8 +55,7 @@ const CHUNK_CACHE_MAX = 200;
 const _getContextChunks = async (planId, queryEmbedding, topK = 5) => {
   if (!planId) return [];
 
-  // Key gọn: planId + 8 giá trị đầu của embedding (float → 2 chữ số)
-  const embKey = queryEmbedding.slice(0, 8).map(v => v.toFixed(2)).join(",");
+  const embKey = queryEmbedding.slice(0, 20).map(v => v.toFixed(4)).join(",");
   const cacheKey = `${planId}:${embKey}`;
 
   if (_chunkCache.has(cacheKey)) {

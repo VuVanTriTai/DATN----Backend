@@ -631,6 +631,11 @@ const extractTextFromFile = async (file) => {
     );
   }
 
+  // ✅ CHỐNG SPAM IMAGE: thay thế/dọn dẹp các thẻ <!-- image --> từ tài liệu gốc
+  extracted.text = String(extracted.text || "")
+    .replace(/(<!--\s*image\s*-->\s*\n?){3,}/gi, "\n*(Tài liệu gốc có hình/công thức minh họa tại đây)*\n")
+    .replace(/(<!--\s*image\s*-->\s*\n?){1,2}/gi, "\n*(hình minh họa)*\n");
+
   // ── Quality check ────────────────────────────────────────────────────────
   const quality = checkExtractQuality(extracted.text);
 

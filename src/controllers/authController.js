@@ -308,6 +308,64 @@ const googleLogin = async (req, res) => {
     }
 };
 
+/**
+ * 10. ĐĂNG KÝ VAI TRÒ GIÁO VIÊN
+ */
+const registerInstructor = async (req, res) => {
+    try {
+        const { specialization, bio, teachingFields } = req.body;
+        
+        // Tìm user hiện tại
+        const user = await User.findById(req.user.id);
+        if (!user) {
+            return res.status(404).json({ success: false, message: "Không tìm thấy người dùng." });
+        }
+
+        // Kiểm tra xem đã là giảng viên chưa
+        if (user.role.includes("instructor")) {
+            return res.status(400).json({ success: false, message: "Tài khoản của bạn đã là Giảng viên rồi." });
+        }
+
+        // Cập nhật vai trò và thông tin giảng viên
+        user.role.push("instructor");
+        user.instructorProfile = {
+            specialization: specialization || "",
+            bio: bio || "",
+            teachingFields: Array.isArray(teachingFields) ? teachingFields : (teachingFields ? teachingFields.split(",").map(t => t.trim()) : [])
+        };
+
+        // Tạo lại token mới chứa role mới
+        const accessToken = generateToken(
+            { id: user._id, role: user.role }, 
+            process.env.ACCESS_TOKEN_SECRET, 
+            "1d"
+        );
+        const refreshToken = generateToken(
+            { id: user._id }, 
+            process.env.REFRESH_TOKEN_SECRET, 
+            "7d"
+        );
+
+        user.refreshToken = refreshToken;
+        await user.save();
+
+        return res.success({
+            accessToken,
+            refreshToken,
+            user: { 
+                id: user._id, 
+                fullName: user.fullName, 
+                email: user.email,
+                role: user.role,
+                instructorProfile: user.instructorProfile
+            }
+        }, "Đăng ký vai trò Giảng viên thành công!");
+    } catch (error) {
+        console.error("Lỗi đăng ký giảng viên:", error);
+        return res.error(error.message, 500);
+    }
+};
+
 // EXPORT TOÀN BỘ ĐỂ ROUTES SỬ DỤNG
 module.exports = { 
     register, 
@@ -318,5 +376,6 @@ module.exports = {
     changePassword, 
     getInstructors ,
     searchUser,
-    googleLogin
+    googleLogin,
+    registerInstructor
 };

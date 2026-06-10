@@ -552,8 +552,8 @@ const finalizeCreateCourse = async (req, res) => {
     console.log("📦 Chunk + embedding...");
     await planService.processAndStoreDocument(plan._id, extractedText);
 
-    console.log("⏳ Đợi index (1s)...");
-    await sleep(1000);
+    console.log(`⏳ Đợi index (${VECTOR_INDEX_WAIT_MS}ms)...`);
+    await sleep(VECTOR_INDEX_WAIT_MS);
 
     // BƯỚC 7: XÂY DỰNG KHUNG CHƯƠNG TRÌNH HỌC (GENERATE SYLLABUS)
     // Nếu người dùng chọn dùng luôn đề xuất ban đầu (previewPlan), hệ thống sẽ giữ nguyên.
@@ -968,17 +968,42 @@ const sharePrivate = async (req, res) => {
     const { id } = req.params;
     const { targetUserId } = req.body;
 
-    const plan = await Plan.findById(id);
-    if (!plan || plan.owner.toString() !== req.user.id) {
+    const originalPlan = await Plan.findById(id);
+    if (!originalPlan || originalPlan.owner.toString() !== req.user.id) {
       return res.error("Bạn không có quyền chia sẻ lộ trình này", 403);
     }
 
-    if (!plan.sharedWith.includes(targetUserId)) {
-      plan.sharedWith.push(targetUserId);
-      await plan.save();
+    // 1. Nhân bản Plan cho người được chia sẻ
+    const planData = originalPlan.toObject();
+    delete planData._id;
+    delete planData.createdAt;
+    delete planData.updatedAt;
+
+    const clonedPlan = new Plan({
+      ...planData,
+      owner: req.user.id, // Vẫn là người gửi để hiển thị tên người gửi trong mục Lộ trình được chia sẻ
+      sharedWith: [targetUserId], // Gắn targetUserId vào sharedWith để người nhận thấy
+    });
+    await clonedPlan.save();
+
+    // 2. Nhân bản tất cả các Lesson của lộ trình
+    const originalLessons = await Lesson.find({ planId: id });
+    if (originalLessons.length > 0) {
+      const newLessons = originalLessons.map((lesson) => {
+        const lessonData = lesson.toObject();
+        delete lessonData._id;
+        delete lessonData.createdAt;
+        delete lessonData.updatedAt;
+        return {
+          ...lessonData,
+          planId: clonedPlan._id,
+          status: lessonData.dayNumber === 1 ? "in-progress" : "locked",
+        };
+      });
+      await Lesson.insertMany(newLessons);
     }
 
-    return res.success(null, "Đã chia sẻ thành công!");
+    return res.success(clonedPlan, "Đã chia sẻ thành công dưới dạng bản sao!");
   } catch (error) {
     console.error("sharePrivate error:", error);
     return res.error(error.message, 500);

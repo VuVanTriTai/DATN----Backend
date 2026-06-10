@@ -92,8 +92,33 @@ const submitAdaptive = async (req, res) => {
       }
     }
 
-    if (pool.length === 0) {
-      return res.error("Bài học chưa có nội dung quiz. Vui lòng thử lại sau.", 400);
+    // ── Pool rỗng: cho phép bỏ qua quiz, vẫn mở khoá ngày tiếp theo ────────
+    const poolEmpty = pool.length === 0;
+    if (poolEmpty) {
+      console.warn(`[submitAdaptive] Pool vẫn rỗng sau khi thử tạo → bypass quiz, mở khoá ngày tiếp theo (dayNumber=${dayNumber})`);
+
+      // Vẫn ghi nhận ngày đã hoàn thành (completedDays) với điểm 0
+      await Progress.findOneAndUpdate(
+        { userId, planId },
+        { $addToSet: { completedDays: Number(dayNumber) } },
+        { upsert: true }
+      );
+      await Lesson.findByIdAndUpdate(lessonId, { status: "completed" });
+
+      const adaptive = await lessonQuizService.processAdaptiveResult(
+        userId, planId, dayNumber, 0, lessonId
+      );
+
+      return res.success(
+        {
+          score: 0, total: 0, percentage: 0,
+          currentLevel: "INTERMEDIATE",
+          detailedResults: [],
+          adaptive,
+          quizBypassed: true,
+        },
+        "Quiz chưa sẵn sàng — đã mở khoá ngày tiếp theo."
+      );
     }
 
     // ── Chuẩn hoá answers ────────────────────────────────────────────────────

@@ -7,8 +7,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 "use strict";
 
-const Lesson   = require("../models/Lesson");
-const Chunk    = require("../models/Chunk");
+const Lesson = require("../models/Lesson");
+const Chunk = require("../models/Chunk");
 const Progress = require("../models/Progress");
 const { makeGroqRequest } = require("./planService");
 
@@ -17,9 +17,9 @@ const POOL_SIZE = 30; // Số câu trong quizPool
 
 // Phân bổ độ khó theo trình độ người dùng
 const DIFFICULTY_DIST = {
-  BEGINNER:     { easy: 0.6, medium: 0.3, hard: 0.1 },
+  BEGINNER: { easy: 0.6, medium: 0.3, hard: 0.1 },
   INTERMEDIATE: { easy: 0.2, medium: 0.5, hard: 0.3 },
-  EXPERT:       { easy: 0.1, medium: 0.3, hard: 0.6 },
+  EXPERT: { easy: 0.1, medium: 0.3, hard: 0.6 },
 };
 
 // ── Hàm phụ trợ (Retry Logic) ────────────────────────────────────────────────
@@ -32,7 +32,7 @@ const retryWithBackoff = async (fn, maxRetries = 4) => {
     } catch (err) {
       const msg = String(err?.error?.message || err?.message || "");
       const isRateLimit = /rate_limit_exceeded|429/i.test(msg) || err?.status === 429;
-      
+
       if (!isRateLimit) throw err;
       if (attempt === maxRetries - 1) {
         console.error("[lessonQuizService] Max retries reached for Rate Limit.");
@@ -61,79 +61,132 @@ const retryWithBackoff = async (fn, maxRetries = 4) => {
  * Sinh pool câu hỏi trắc nghiệm từ nội dung bài học.
  * Phân bổ số lượng và độ khó dựa theo learningFocus và learningDepth của Plan.
  */
+// Lock tránh 2 request sinh quiz cho cùng 1 lesson cùng lúc
+const _generatingPools = new Set();
+
 const generateQuizPool = async (lessonId) => {
-  const lesson = await Lesson.findById(lessonId).populate("planId");
-  if (!lesson) throw new Error("Không tìm thấy bài học");
+  const lessonIdStr = String(lessonId);
 
-  const plan  = lesson.planId;
-  const focus = plan?.learningFocus || plan?.learningGoals?.focus || "theory";
-  const depth = plan?.learningDepth || plan?.learningGoals?.depth || "basic";
-
-  // ────────────────────────────────────────────────
-  // 4 CHẾ ĐỘ QUIZ DỰA THEO TRỌNG TÂM + MỨC ĐỘ
-  // ────────────────────────────────────────────────
-  let numQuestions, easyRatio, mediumRatio, hardRatio;
-
-  if (focus === "practice" && depth === "deep") {
-    // 4. Thực hành - Nâng cao: 20 câu, độ khó cao, liên quan nhiều đến thực hành, áp dụng lý thuyết
-    numQuestions = 20; easyRatio = 0.05; mediumRatio = 0.25; hardRatio = 0.70;
-  } else if (focus === "practice" && depth === "basic") {
-    // 3. Thực hành - Cơ bản: 20 câu, độ khó cơ bản, liên quan nhiều đến thực hành, áp dụng lý thuyết
-    numQuestions = 20; easyRatio = 0.30; mediumRatio = 0.50; hardRatio = 0.20;
-  } else if (focus === "theory" && depth === "deep") {
-    // 2. Lý thuyết - Nâng cao: 10 câu, độ khó cao, liên quan nhiều đến lý thuyết
-    numQuestions = 10; easyRatio = 0.10; mediumRatio = 0.30; hardRatio = 0.60;
-  } else {
-    // 1. Lý thuyết - Cơ bản: 10 câu, độ khó cơ bản, liên quan nhiều đến lý thuyết
-    numQuestions = 10; easyRatio = 0.60; mediumRatio = 0.30; hardRatio = 0.10;
+  if (_generatingPools.has(lessonIdStr)) {
+    console.warn(`[QuizPool] Đang sinh pool cho ${lessonIdStr}, bỏ qua request trùng`);
+    await sleep(15000);
+    const lessonCached = await Lesson.findById(lessonId).lean();
+    return lessonCached?.quizPool || [];
   }
 
-  console.log(`[QuizPool] Mode: Focus=${focus}, Depth=${depth} → ${numQuestions} câu | Easy=${easyRatio*100}% Med=${mediumRatio*100}% Hard=${hardRatio*100}%`);
+  _generatingPools.add(lessonIdStr);
 
-  let context = lesson.content || "";
-  context = context.substring(0, 2500);
+  try {
+    const lesson = await Lesson.findById(lessonId).populate("planId");
+    if (!lesson) throw new Error("Không tìm thấy bài học");
 
-  const prompt = _buildQuizPoolPrompt(
-    lesson.title,
-    lesson.summary || "",
-    context,
-    numQuestions,
-    easyRatio,
-    mediumRatio,
-    hardRatio,
-    focus,
-    depth
-  );
+    const plan = lesson.planId;
+    const focus = plan?.learningFocus || plan?.learningGoals?.focus || "theory";
+    const depth = plan?.learningDepth || plan?.learningGoals?.depth || "basic";
 
-  // Thiết lập temperature động dựa theo Focus & Depth để AI sáng tạo câu hỏi vận dụng khi cần
-  let temperature = 0.0;
-  if (focus === "practice" && depth === "deep") {
-    temperature = 0.5; // Chế độ thực hành chuyên sâu: cần tạo tình huống thực tế, code debug phức tạp
-  } else if (focus === "practice") {
-    temperature = 0.3; // Thực hành cơ bản: câu hỏi vận dụng đơn giản
-  } else if (depth === "deep") {
-    temperature = 0.3; // Lý thuyết chuyên sâu: so sánh nguyên lý, phân tích tình huống
+    let numQuestions, easyRatio, mediumRatio, hardRatio;
+
+    if (focus === "practice" && depth === "deep") {
+      numQuestions = 20; easyRatio = 0.05; mediumRatio = 0.25; hardRatio = 0.70;
+    } else if (focus === "practice" && depth === "basic") {
+      numQuestions = 20; easyRatio = 0.30; mediumRatio = 0.50; hardRatio = 0.20;
+    } else if (focus === "theory" && depth === "deep") {
+      numQuestions = 10; easyRatio = 0.10; mediumRatio = 0.30; hardRatio = 0.60;
+    } else {
+      numQuestions = 10; easyRatio = 0.60; mediumRatio = 0.30; hardRatio = 0.10;
+    }
+
+    console.log(`[QuizPool] Mode: Focus=${focus}, Depth=${depth} → ${numQuestions} câu | Easy=${easyRatio * 100}% Med=${mediumRatio * 100}% Hard=${hardRatio * 100}%`);
+
+    let context = lesson.content || "";
+    context = context.substring(0, 2500);
+
+    let temperature = 0.0;
+    if (focus === "practice" && depth === "deep") {
+      temperature = 0.5;
+    } else if (focus === "practice") {
+      temperature = 0.3;
+    } else if (depth === "deep") {
+      temperature = 0.3;
+    }
+
+    console.log(`[QuizPool] Selected temperature: ${temperature}`);
+
+    const prompt = _buildQuizPoolPrompt(
+      lesson.title,
+      lesson.summary || "",
+      context,
+      numQuestions,
+      easyRatio,
+      mediumRatio,
+      hardRatio,
+      focus,
+      depth
+    );
+
+    // ── Lần 1: gọi với prompt đầy đủ ────────────────────────────────────────
+    let parsed;
+    try {
+      const resText = await makeGroqRequest({
+        messages: [{ role: "user", content: prompt }],
+        model: "llama-3.1-8b-instant",
+        temperature,
+        maxTokens: 4000,
+        enforceJSON: true,
+      });
+      parsed = extractJSON(resText);
+    } catch (err) {
+      console.warn("[QuizPool] Lần 1 thất bại:", err.message, "→ thử lại với prompt đơn giản hơn...");
+
+      // ── Lần 2: prompt tối giản, temperature=0, context ngắn hơn ────────────
+      try {
+        const retryResText = await makeGroqRequest({
+          messages: [
+            {
+              role: "system",
+              content: "Output ONLY valid JSON. Start with '{'. No explanation, no markdown.",
+            },
+            {
+              role: "user",
+              content:
+                `Tạo ${numQuestions} câu trắc nghiệm về "${lesson.title}" dựa trên:\n${context.slice(0, 1500)}\n\n` +
+                `JSON: {"questions":[{"question":"...","options":["A","B","C","D"],"correctAnswer":0,"explanation":"...","difficulty":"easy|medium|hard","bloomLevel":"..."}]}`,
+            },
+          ],
+          model: "llama-3.1-8b-instant",
+          temperature: 0,
+          maxTokens: 3000,
+          enforceJSON: true,
+        });
+        parsed = extractJSON(retryResText);
+      } catch (retryErr) {
+        throw new Error(`generateQuizPool thất bại sau 2 lần: ${retryErr.message}`);
+      }
+    }
+
+    const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
+
+    if (questions.length === 0) {
+      throw new Error("Model trả về 0 câu hỏi hợp lệ");
+    }
+
+    const validQuestions = questions.filter(
+      (q) => q?.question && Array.isArray(q?.options) && q.options.length >= 2
+    );
+
+    if (validQuestions.length === 0) {
+      throw new Error("Tất cả câu hỏi đều bị lỗi cấu trúc");
+    }
+
+    await Lesson.findByIdAndUpdate(lessonId, { quizPool: validQuestions });
+    console.log(`✅ Quiz pool: ${validQuestions.length} câu cho "${lesson.title}" (Focus: ${focus}, Depth: ${depth})`);
+
+    return validQuestions;
+
+  } finally {
+    _generatingPools.delete(lessonIdStr);
   }
-
-  console.log(`[QuizPool] Selected temperature: ${temperature}`);
-
-  // Sử dụng makeGroqRequest hỗ trợ xoay vòng API keys + fallback Gemini.
-  const resText = await makeGroqRequest({
-    messages: [{ role: "user", content: prompt }],
-    model: "llama-3.1-8b-instant",
-    temperature,
-    enforceJSON: true
-  });
-
-  const parsed    = JSON.parse(resText);
-  const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
-
-  await Lesson.findByIdAndUpdate(lessonId, { quizPool: questions });
-  console.log(`✅ Quiz pool: ${questions.length} câu cho "${lesson.title}" (Focus: ${focus}, Depth: ${depth})`);
-
-  return questions;
 };
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. CHỌN CÂU HỎI THEO TRÌNH ĐỘ
@@ -159,20 +212,20 @@ const selectQuestionsAdaptive = async (lessonId, userLevel = "INTERMEDIATE", num
     return []; // trả về rỗng, frontend sẽ poll tiếp
   }
 
-  const dist   = DIFFICULTY_DIST[userLevel] || DIFFICULTY_DIST.INTERMEDIATE;
-  const easy   = pool.filter((q) => q.difficulty === "easy");
+  const dist = DIFFICULTY_DIST[userLevel] || DIFFICULTY_DIST.INTERMEDIATE;
+  const easy = pool.filter((q) => q.difficulty === "easy");
   const medium = pool.filter((q) => q.difficulty === "medium");
-  const hard   = pool.filter((q) => q.difficulty === "hard");
+  const hard = pool.filter((q) => q.difficulty === "hard");
 
   const picked = [
-    ..._pickRandom(easy,   Math.round(numQuestions * dist.easy)),
+    ..._pickRandom(easy, Math.round(numQuestions * dist.easy)),
     ..._pickRandom(medium, Math.round(numQuestions * dist.medium)),
-    ..._pickRandom(hard,   Math.round(numQuestions * dist.hard)),
+    ..._pickRandom(hard, Math.round(numQuestions * dist.hard)),
   ];
 
   // Bù nếu một nhóm độ khó không đủ số lượng
   if (picked.length < numQuestions) {
-    const usedSet   = new Set(picked.map((q) => q.question));
+    const usedSet = new Set(picked.map((q) => q.question));
     const remaining = pool.filter((q) => !usedSet.has(q.question));
     picked.push(..._shuffle(remaining).slice(0, numQuestions - picked.length));
   }
@@ -227,12 +280,12 @@ const processAdaptiveResult = async (userId, planId, dayNumber, score, lessonId)
   );
 
   return {
-    action:        "completed",
+    action: "completed",
     score,
-    message:       score >= 60
+    message: score >= 60
       ? `Hoàn thành! Bạn đạt ${score}%. Bài học tiếp theo đã được mở.`
       : `Bạn đạt ${score}%. Cố gắng hơn ở bài sau nhé!`,
-    nextUnlocked:  !!unlocked,
+    nextUnlocked: !!unlocked,
     nextDayNumber: unlocked ? nextDay : null,
   };
 };
@@ -249,56 +302,105 @@ const _shuffle = (arr) => [...arr].sort(() => Math.random() - 0.5);
 const _buildQuizPoolPrompt = (lessonTitle, lessonSummary, context, numQuestions, easyRatio, mediumRatio, hardRatio, focus, depth) => {
   let focusInstruction;
   if (focus === "practice" && depth === "deep") {
-    focusInstruction = "TẬP TRUNG THỰC HÀNH CHUYÊN SÂU: Tạo câu hỏi dựa vào tình huống thực tế cụ thể (case study thực tế, bài toán phân tích, đoạn code, chẩn đoán lỗi/vấn đề), đòi hỏi phân tích nguyên nhân cốt lõi, so sánh ưu/nhược điểm của các giải pháp và vận dụng kiến thức chuyên sâu.";
+    focusInstruction = "Tạo câu hỏi dựa vào tình huống thực tế, đòi hỏi phân tích nguyên nhân và so sánh giải pháp.";
   } else if (focus === "practice") {
-    focusInstruction = "TẬP TRUNG THỰC HÀNH CƠ BẢN: Tạo câu hỏi kiểm tra khả năng áp dụng kiến thức vào bài toán/tình huống thực tiễn đơn giản, nhận diện ứng dụng phù hợp trong ngữ cảnh.";
+    focusInstruction = "Tạo câu hỏi kiểm tra khả năng vận dụng kiến thức vào bài toán cụ thể.";
   } else if (depth === "deep") {
-    focusInstruction = "TẬP TRUNG LÝ THUYẾT CHUYÊN SÂU: Tạo câu hỏi so sánh đối chiếu khái niệm tương đồng, giải thích nguyên lý vận hành sâu xa, đánh giá tính đúng/sai dưới các ràng buộc hoặc điều kiện cụ thể.";
+    focusInstruction = "Tạo câu hỏi phân tích sâu về nguyên lý, so sánh khái niệm tương đồng.";
   } else {
-    focusInstruction = "TẬP TRUNG LÝ THUYẾT CƠ BẢN: Kiểm tra sự hiểu biết về định nghĩa, thuật ngữ chuyên môn, các đặc điểm nhận biết cốt lõi và nguyên lý cơ bản cần ghi nhớ.";
+    focusInstruction = "Tạo câu hỏi kiểm tra hiểu biết về định nghĩa, thuật ngữ, các đặc điểm cần ghi nhớ.";
   }
 
-  return `Bạn là chuyên gia khảo thí và biên soạn câu hỏi trắc nghiệm khách quan. Nhiệm vụ của bạn là tạo đúng ${numQuestions} câu hỏi trắc nghiệm dựa TRÊN DUY NHẤT nội dung bài học được cung cấp dưới đây.
+  const easyCount = Math.round(numQuestions * easyRatio);
+  const mediumCount = Math.round(numQuestions * mediumRatio);
+  const hardCount = numQuestions - easyCount - mediumCount; // dùng trừ để đảm bảo tổng đúng
 
-=== BÀI HỌC: "${lessonTitle}" ===
-Tóm tắt: ${lessonSummary}
----
-${context}
-=== KẾT THÚC NỘI DUNG ===
+  return `Bạn là chuyên gia khảo thí. Tạo ĐÚNG ${numQuestions} câu hỏi trắc nghiệm cho bài học sau.
 
-YÊU CẦU NGHIÊM NGẶT VỀ NỘI DUNG & CHẤT LƯỢNG (HẠN CHẾ HALLUCINATION & BẢO ĐẢM TÍNH ĐÚNG ĐẮN):
-1. CHỈ SỬ DỤNG thông tin được đề cập trực tiếp trong nội dung bài học ở trên. Không sử dụng kiến thức hoặc suy diễn bên ngoài.
-2. MỖI CÂU HỎI CHỈ ĐƯỢC PHÉP CÓ DUY NHẤT 1 ĐÁP ÁN ĐÚNG. 3 phương án còn lại bắt buộc phải là đáp án SAI hoàn toàn và không thể tranh cãi.
-3. TUYỆT ĐỐI KHÔNG sinh câu hỏi có nhiều hơn một đáp án đúng hoặc mập mờ về mặt ngữ nghĩa/kỹ thuật.
-4. Giá trị "correctAnswer" phải là số nguyên (0, 1, 2, hoặc 3) trỏ CHÍNH XÁC đến vị trí của đáp án đúng duy nhất trong mảng "options". Nghiêm cấm đặt sai lệch index của đáp án đúng.
-5. Giải thích ("explanation") phải ghi rõ lý do đáp án đó đúng và giải thích ngắn gọn vì sao 3 phương án còn lại sai dựa vào bài học.
-6. ${focusInstruction}
+=== NỘI DUNG BÀI HỌC: "${lessonTitle}" ===
+${lessonSummary ? `Tóm tắt: ${lessonSummary}\n` : ""}${context}
+=== KẾT THÚC ===
 
-QUY TRÌNH TỰ KIỂM TRA CHÉO (SELF-VERIFY):
-Trước khi trả về JSON, bạn phải duyệt qua từng câu hỏi trong danh sách:
-- Đọc lại nội dung câu hỏi.
-- Lấy đáp án tại vị trí options[correctAnswer] kiểm tra xem nó có đúng 100% không.
-- Kiểm tra xem 3 options còn lại có thực sự sai lệch 100% không.
-Nếu phát hiện lỗi logic hoặc lệch index, hãy sửa lại ngay lập tức trước khi xuất kết quả.
+YÊU CẦU BẮT BUỘC:
+1. Tạo CHÍNH XÁC ${numQuestions} câu — array "questions" phải có đúng ${numQuestions} phần tử.
+2. ${focusInstruction}
+3. Câu hỏi CHỈ dựa vào nội dung bài học, không bịa thêm thông tin ngoài.
+4. Mỗi câu kiểm tra một khía cạnh KHÁC NHAU, không lặp lại concept.
 
-PHÂN BỔ SỐ LƯỢNG VÀ ĐỘ KHÓ (Tổng số câu hỏi phải bằng chính xác ${numQuestions}):
-- ${Math.round(numQuestions * easyRatio)} câu DỄ (easy): Nhận biết / Ghi nhớ định nghĩa, cú pháp hoặc thuật ngữ cụ thể.
-- ${Math.round(numQuestions * mediumRatio)} câu TRUNG BÌNH (medium): Thông hiểu / Vận dụng trực tiếp trong ngữ cảnh.
-- ${Math.round(numQuestions * hardRatio)} câu KHÓ (hard): Phân tích / Đánh giá tình huống hoặc giải quyết vấn đề.
+QUY TẮC BẮT BUỘC VỀ ĐỊNH DẠNG CÂU HỎI:
+- Mỗi câu phải là câu hỏi có nội dung rõ ràng, kết thúc bằng dấu "?"
+- 4 đáp án phải là các phương án CỤ THỂ, KHÁC NHAU về nội dung
+- NGHIÊM CẤM dùng đáp án chung chung như "Đúng", "Sai", "Không rõ", "Không liên quan", "Tất cả đều đúng", "Tất cả đều sai"
+- Đáp án sai phải hợp lý, dễ nhầm lẫn — không phải vô nghĩa
+- Ví dụ câu hỏi TỐT: "Khoảng cách từ nhà máy VinFast đến Cảng Tân Vũ là bao nhiêu?" với đáp án "18 km", "25 km", "12 km", "30 km"
+- Ví dụ câu hỏi XẤU (NGHIÊM CẤM): "Phát biểu X có đúng không?" với đáp án "Đúng / Sai / Không rõ / Không liên quan"
 
-Trả về kết quả dưới dạng JSON thuần túy (không kèm markdown block ngoài JSON):
+PHÂN BỔ ĐỘ KHÓ (bắt buộc, tổng = ${numQuestions}):
+- ${easyCount} câu "easy": câu hỏi nhận biết, ghi nhớ sự kiện, con số, định nghĩa
+- ${mediumCount} câu "medium": câu hỏi thông hiểu, so sánh, vận dụng đơn giản  
+- ${hardCount} câu "hard": câu hỏi phân tích, đánh giá tình huống phức tạp
+
+Trả về JSON hợp lệ, bắt đầu bằng '{', không có text trước hoặc sau:
 {
   "questions": [
     {
-      "question": "Nội dung câu hỏi trắc nghiệm?",
-      "options": ["Lựa chọn 1", "Lựa chọn 2", "Lựa chọn 3", "Lựa chọn 4"],
+      "question": "Câu hỏi cụ thể có nội dung rõ ràng?",
+      "options": ["Đáp án A cụ thể", "Đáp án B cụ thể", "Đáp án C cụ thể", "Đáp án D cụ thể"],
       "correctAnswer": 0,
-      "explanation": "Giải thích câu đúng dựa hoàn toàn trên bài học ở trên.",
-      "difficulty": "easy|medium|hard",
-      "bloomLevel": "Nhận biết|Thông hiểu|Vận dụng|Phân tích|Đánh giá"
+      "explanation": "Giải thích ngắn gọn tại sao đáp án đúng",
+      "difficulty": "easy",
+      "bloomLevel": "Nhận biết"
     }
   ]
 }`;
+};
+// ── JSON Extractor (rescue khi model trả text trước JSON) ────────────────────
+const extractJSON = (raw) => {
+  if (!raw || typeof raw !== "string") throw new Error("Empty response");
+
+  // Thử parse thẳng trước
+  try { return JSON.parse(raw); } catch (_) { }
+
+  // Tìm markdown code block ```json ... ``` trước (ưu tiên hơn vì rõ ràng hơn)
+  const mdMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (mdMatch?.[1]) {
+    try { return JSON.parse(mdMatch[1].trim()); } catch (_) { }
+  }
+
+  // Tìm vị trí { hoặc [ đầu tiên
+  const firstBrace = raw.indexOf("{");
+  const firstBracket = raw.indexOf("[");
+  const start = [firstBrace, firstBracket]
+    .filter((i) => i >= 0)
+    .reduce((min, i) => Math.min(min, i), Infinity);
+
+  if (start === Infinity) {
+    throw new Error(`Cannot extract JSON from response: ${raw.slice(0, 120)}`);
+  }
+
+  // Tìm vị trí } hoặc ] cuối cùng
+  const lastBrace = raw.lastIndexOf("}");
+  const lastBracket = raw.lastIndexOf("]");
+  const end = Math.max(lastBrace, lastBracket);
+
+  if (end < start) {
+    throw new Error(`Cannot extract JSON from response: ${raw.slice(0, 120)}`);
+  }
+
+  const candidate = raw.slice(start, end + 1);
+
+  // Thử parse thẳng
+  try { return JSON.parse(candidate); } catch (_) { }
+
+  // Thử escape newline bên trong string rồi parse lại
+  try {
+    const escaped = candidate.replace(/("(?:[^"\\]|\\.)*")/g, (m) =>
+      m.replace(/\n/g, "\\n").replace(/\r/g, "\\r")
+    );
+    return JSON.parse(escaped);
+  } catch (_) { }
+
+  throw new Error(`Cannot extract JSON from response: ${raw.slice(0, 120)}`);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -306,4 +408,5 @@ module.exports = {
   generateQuizPool,
   selectQuestionsAdaptive,
   processAdaptiveResult,
+  extractJSON,
 };

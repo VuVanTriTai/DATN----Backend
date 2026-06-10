@@ -4,8 +4,9 @@
 //
 // ⚠️  YÊU CẦU: Tạo thủ công trên MongoDB Atlas một Vector Search Index tên
 //     "lesson_vector_index" trên collection "lessonembeddings", field "embedding",
-//     dimensions = 1024, similarity = cosine.
-//     Filter fields cần được khai báo trong index: ownerId (token), isPublic (boolean).
+//     dimensions = 384,   ← sửa từ 1024
+//     similarity = cosine.
+//     Model: Xenova/all-MiniLM-L6-v2
 
 const mongoose = require("mongoose");
 
