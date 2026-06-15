@@ -1882,6 +1882,12 @@ YÊU CẦU FORMAT:
 - Markdown chuẩn (##, ###, bullet, code fence nếu có code)
 - KHÔNG có quiz, JSON, hay meta-commentary
 - Mỗi phần ## PHẢI có ít nhất 2 dòng nội dung
+
+⚠️ QUY TẮC BIÊN TẬP (QUAN TRỌNG NHẤT):
+- Mỗi luận điểm PHẢI xuất phát từ thông tin có trong CONTEXT
+- Nếu CONTEXT không đề cập đến thông tin → KHÔNG viết về thông tin đó
+- Ưu tiên PARAPHRASE (diễn giải lại) hoặc TRÍCH DẪN TRỰC TIẾP từ CONTEXT
+- Khi không chắc chắn → dùng câu "Theo tài liệu..." hoặc bỏ qua
 `;
 
   // =========================
@@ -1892,8 +1898,10 @@ YÊU CẦU FORMAT:
       messages: [
         {
           role: "system",
+          // ✅ IMPROVEMENT: System prompt đổi từ “viết sáng tạo” sang “biên tập từ tài liệu”
+          // Giảm hallucination bằng cách buộc AI được cảnh báo ngoài role mở đầu
           content:
-            "Bạn viết bài giảng Markdown. TUÂN THỦ NGHIÊM NGẶT phạm vi. Không được phép sáng tạo ngoài dữ liệu.",
+            "Bạn là biên tập viên giáo dục. Nhiệm vụ là TỔ CHỨC LẠI nội dung từ tài liệu gốc, TUYTỆT ĐỐI không được thêm kiến thức ngoài CONTEXT. Nếu không có thông tin trong CONTEXT → viết [Tài liệu không đề cập] thay vì tự thêm vào.",
         },
         {
           role: "user",
@@ -1981,6 +1989,59 @@ YÊU CẦU FORMAT:
     }
 
     // =========================
+    // TWO-PASS VERIFICATION (HALLUCINATION CHECK)
+    // Dùng LLM nhỏ (8b) quét nội dung — đánh dấu các đoạn
+    // AI có thể đã thêm thông tin NGOÀI context.
+    // Nhẹ: chỉ chạy khi content > 400 ký tự, không retry nếu fail.
+    // =========================
+    if (content.length > 400 && safeContext.length > 100) {
+      try {
+        const verifyPrompt = `Bạn là kiểm duyệt viên nội dung học thuật.
+
+CONTEXT TÀI LIỆU GỐC (nguồn duy nhất hợp lệ):
+---
+${safeContext.slice(0, 3000)}
+---
+
+BÀI GIẢNG DO AI SINH (cần kiểm tra):
+---
+${content.slice(0, 2000)}
+---
+
+NHIỆM VỤ: Tìm các đoạn trong BÀI GIẢNG có thể chứa thông tin KHÔNG có trong CONTEXT.
+- Nếu bài giảng hoàn toàn bám sát context → trả về: {"ok": true, "flagged": []}
+- Nếu có đoạn nghi ngờ → trả về: {"ok": false, "flagged": ["đoạn nghi ngờ 1 (tối đa 60 ký tự)", "..."]}
+- Chỉ flag khi CHẮC CHẮN không có trong context, không flag khi không chắc.
+
+Chỉ trả về JSON, không giải thích thêm.`;
+
+        const verifyRes = await makeGroqRequest({
+          messages: [
+            { role: "system", content: "Chỉ trả về JSON hợp lệ." },
+            { role: "user", content: verifyPrompt },
+          ],
+          model: MODEL_FAST,
+          temperature: 0.0,
+          maxTokens: 400,
+          enforceJSON: true,
+        });
+
+        const verifyData = safeJSONParse(verifyRes);
+
+        if (verifyData && !verifyData.ok && Array.isArray(verifyData.flagged) && verifyData.flagged.length > 0) {
+          console.warn(`[TwoPass] Day ${dayNumber} — phát hiện ${verifyData.flagged.length} đoạn nghi ngờ:`, verifyData.flagged);
+          // Gắn cảnh báo nhẹ cuối bài thay vì xóa nội dung (tránh mất nhiều thông tin đúng)
+          content += `\n\n> ⚠️ *Lưu ý: Một số nội dung trong bài có thể cần đối chiếu lại với tài liệu gốc.*`;
+        } else {
+          console.log(`[TwoPass] Day ${dayNumber} — nội dung bám sát context ✅`);
+        }
+      } catch (verifyErr) {
+        // Two-Pass fail không được làm hỏng flow chính
+        console.warn(`[TwoPass] Day ${dayNumber} — skip (lỗi):`, verifyErr.message);
+      }
+    }
+
+    // =========================
     // FINAL SAFETY CUT (FIX-NEW)
     // =========================
     if (content.length < 100) {
@@ -1988,6 +2049,7 @@ YÊU CẦU FORMAT:
     }
 
     return content;
+
   } catch (err) {
     console.warn("[Phase1] Content failed:", err.message);
 
@@ -2470,9 +2532,14 @@ const processAndStoreDocument = async (planId, text) => {
           embedding,
           chunkIndex: c.index ?? i,
           section: sanitizeSectionName(c.section || ""),
-          topic: c.topic || "general",   // ← lưu topic vào DB
+          topic: c.topic || "general",
+          // ✅ IMPROVEMENT: Metadata phượng pháp để truy vết và lọc chunk thông minh hơn
+          chunkType: c.chunkType || "text",
           metadata: {
-            wordCount: c.wordCount || safeContent.split(" ").length,
+            wordCount  : c.wordCount || safeContent.split(" ").length,
+            hasCode    : c.hasCode    ?? /```[\s\S]+?```/.test(safeContent),
+            hasTable   : c.hasTable   ?? /^\|.+\|/m.test(safeContent),
+            hasFormula : c.hasFormula ?? /\$[^$]+\$/.test(safeContent),
           },
         };
 

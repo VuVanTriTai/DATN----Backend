@@ -9,8 +9,10 @@ const { rewriteQuery } = require("../utils/queryRewrite");
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const MAX_CONTEXT_CHARS = 10000;  // giảm từ 14000 → 10000 để tránh tràn context với tài liệu học thuật dài
+const MAX_CONTEXT_CHARS = 12000;  // tăng từ 10000 → 12000 để có nhiều context hơn cho RAG
 const MAX_HISTORY_TURNS = 6;
+const RAG_RETRIEVE_K    = 12;     // Tăng từ 6 → 12: lấy nhiều chunk hơn rồi re-rank lại
+const RAG_USE_K         = 6;      // Sau re-rank chỉ dùng top-6 cho context
 
 // ─────────────────────────────────────────────
 // BUILD SYSTEM PROMPT
@@ -45,6 +47,61 @@ const trimHistory = (history = []) => {
 };
 
 // ─────────────────────────────────────────────
+// RE-RANKING: Chọn top chunk phù hợp nhất với câu hỏi
+// Sử dụng keyword overlap (tốc độ nhanh, không cần LLM)
+// ─────────────────────────────────────────────
+const RERANK_STOP_WORDS = new Set([
+    'là', 'của', 'và', 'các', 'cho', 'với', 'những', 'một', 'được',
+    'này', 'khi', 'thì', 'không', 'phải', 'như', 'theo',
+    'the', 'a', 'an', 'is', 'in', 'of', 'to', 'and', 'or', 'for', 'with'
+]);
+
+const _extractKeywords = (text) => {
+    return String(text || '')
+        .toLowerCase()
+        .replace(/[^\w\s\u00C0-\u024F]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 3 && !RERANK_STOP_WORDS.has(w));
+};
+
+const _keywordOverlap = (queryKeywords, chunkContent) => {
+    if (!queryKeywords.length) return 0;
+    const lower = chunkContent.toLowerCase();
+    let hits = 0;
+    for (const kw of queryKeywords) {
+        if (lower.includes(kw)) hits++;
+    }
+    return hits / queryKeywords.length;
+};
+
+/**
+ * Re-rank chunks: kết hợp vector score (từ DB) + keyword overlap.
+ * finalScore = 0.7 * vectorScore + 0.3 * keywordScore
+ */
+const rerankChunks = (question, chunks, topK = RAG_USE_K) => {
+    if (!chunks || chunks.length === 0) return [];
+    const queryKeywords = _extractKeywords(question);
+
+    const scored = chunks.map(c => {
+        const vectorScore = typeof c.score === 'number' ? c.score : 0;
+        const kwScore     = _keywordOverlap(queryKeywords, c.content);
+        const finalScore  = 0.7 * vectorScore + 0.3 * kwScore;
+        return { ...c, _rerankScore: finalScore };
+    });
+
+    scored.sort((a, b) => b._rerankScore - a._rerankScore);
+    const selected = scored.slice(0, topK);
+
+    console.log(
+        `[✏️ Re-rank] ${chunks.length} → ${selected.length} chunks | ` +
+        `scores: ${selected.map(c => c._rerankScore.toFixed(2)).join(', ')}`
+    );
+    return selected;
+};
+
+
+
+// ─────────────────────────────────────────────
 // MAIN
 // ─────────────────────────────────────────────
 const answerQuestionWithRAG = async (
@@ -76,11 +133,14 @@ const answerQuestionWithRAG = async (
         // 3. Retrieve chunks (section → topic-filtered → plain)
         let relevantChunks = [];
         if (coveredSections?.length > 0) {
-            relevantChunks = await searchChunksBySection(planId, coveredSections, queryVector, 6);
+            relevantChunks = await searchChunksBySection(planId, coveredSections, queryVector, RAG_RETRIEVE_K);
         } else {
-            // ⭐ Use topic-filtered search
-            relevantChunks = await searchRelevantChunksByTopic(planId, queryVector, allowedTopics, 6);
+            // ⭐ Use topic-filtered search, lấy nhiều hơn (RAG_RETRIEVE_K) để re-rank
+            relevantChunks = await searchRelevantChunksByTopic(planId, queryVector, allowedTopics, RAG_RETRIEVE_K);
         }
+
+        // 3b. Re-rank chunks — chọn top-RAG_USE_K phù hợp nhất
+        relevantChunks = rerankChunks(question, relevantChunks, RAG_USE_K);
 
         // 4. Build RAG context string
         let ragContext = "";

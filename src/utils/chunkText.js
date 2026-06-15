@@ -45,6 +45,8 @@ const MAX_CHUNK_WORDS          = 350;
 const MIN_CHUNK_WORDS          = 40;
 const MIN_CHUNK_WORDS_NUMBERED = 15;
 const OVERLAP_HEADING          = true;
+// Số câu cuối của chunk trước được lặp lại vào đầu chunk tiếp theo (sliding window overlap)
+const OVERLAP_SENTENCES        = 2;
 
 // ─────────────────────────────────────────────
 // PDF / DOC: numbered heading split across two lines
@@ -148,6 +150,20 @@ const lineKind = (line) => {
   return "text";
 };
 
+// ── OVERLAP HELPER ────────────────────────────────────────────────
+// Lấy N câu cuối từ content của chunk trước để làm "đuôi" cho buffer mới.
+// Giúp RAG không mất context tại ranh giới chunk.
+const getOverlapTail = (content, n) => {
+  if (!content || n <= 0) return "";
+  // Tách câu theo dấu câu; loại bỏ câu quá ngắn
+  const sentences = content
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 20);
+  if (sentences.length === 0) return "";
+  return sentences.slice(-Math.min(n, sentences.length)).join(" ");
+};
+
 const splitSection = (sectionHeading, lines) => {
   const results = [];
 
@@ -156,8 +172,12 @@ const splitSection = (sectionHeading, lines) => {
     ? sectionHeading.split(/\s+/).filter(Boolean).length
     : 0;
 
-  const makeBuffer = () =>
-    sectionHeading && OVERLAP_HEADING ? [sectionHeading, ""] : [];
+  const makeBuffer = (overlapTail = "") => {
+    const base = sectionHeading && OVERLAP_HEADING ? [sectionHeading, ""] : [];
+    // Thêm overlap tail (context câu cuối của chunk trước) vào đầu buffer mới
+    if (overlapTail) base.push(`<!-- overlap --> ${overlapTail}`);
+    return base;
+  };
 
   let buffer  = makeBuffer();
   let words   = headingWords;
@@ -165,18 +185,29 @@ const splitSection = (sectionHeading, lines) => {
   let inTable = false;
 
   const flushBuffer = () => {
-    const content = buffer.join("\n").trim();
+    // Lọc bỏ dòng overlap marker trước khi tính wordCount
+    const cleanLines = buffer.map(l => l.replace(/^<!-- overlap --> /, ""));
+    const content = cleanLines.join("\n").trim();
     const wc      = content.split(/\s+/).filter(Boolean).length;
     if (wc >= MIN_CHUNK_WORDS) {
-      results.push({ content, wordCount: wc });
+      // Phát hiện chunkType dựa trên nội dung
+      const hasCode    = /```[\s\S]+?```/.test(content);
+      const hasTable   = /^\|.+\|/m.test(content);
+      const hasFormula = /\$[^$]+\$|\\[a-z]+\{/.test(content);
+      const chunkType  = hasCode ? "code" : hasTable ? "table" : hasFormula ? "formula" : "text";
+
+      results.push({ content, wordCount: wc, chunkType, hasCode, hasTable, hasFormula });
     } else if (results.length > 0) {
       // FIX-A: merge short trailing buffer into the previous chunk
       results[results.length - 1].content += "\n" + content;
       results[results.length - 1].wordCount += wc;
     }
 
-    buffer = makeBuffer();
-    words  = headingWords;
+    // Lấy overlap tail từ chunk vừa flush để seed cho buffer tiếp theo
+    const lastContent = results.length > 0 ? results[results.length - 1].content : "";
+    const overlapTail = getOverlapTail(lastContent, OVERLAP_SENTENCES);
+    buffer = makeBuffer(overlapTail);
+    words  = headingWords + (overlapTail ? overlapTail.split(/\s+/).filter(Boolean).length : 0);
   };
 
   for (const line of lines) {
@@ -189,7 +220,8 @@ const splitSection = (sectionHeading, lines) => {
     const lineWords = line.split(/\s+/).filter(Boolean).length;
 
     // FIX-B Tier 1 — hard flush when buffer exceeds MAX_CHUNK_WORDS
-    // (catches dense sections with no blank lines)
+    // ⭐ IMPROVEMENT: KHÔNG flush khi đang trong code fence hoặc table
+    // (tránh cắt giữa code block / bảng dữ liệu gây mất ngữ cảnh)
     if (!inFence && !inTable && words >= MAX_CHUNK_WORDS) {
       flushBuffer();
       // FIX-H: if the line that triggered the hard flush is blank,
@@ -212,10 +244,15 @@ const splitSection = (sectionHeading, lines) => {
   }
 
   // FIX-A: always flush remaining content
-  const content = buffer.join("\n").trim();
+  const cleanLines = buffer.map(l => l.replace(/^<!-- overlap --> /, ""));
+  const content = cleanLines.join("\n").trim();
   const wc      = content.split(/\s+/).filter(Boolean).length;
   if (wc >= MIN_CHUNK_WORDS) {
-    results.push({ content, wordCount: wc });
+    const hasCode    = /```[\s\S]+?```/.test(content);
+    const hasTable   = /^\|.+\|/m.test(content);
+    const hasFormula = /\$[^$]+\$|\\[a-z]+\{/.test(content);
+    const chunkType  = hasCode ? "code" : hasTable ? "table" : hasFormula ? "formula" : "text";
+    results.push({ content, wordCount: wc, chunkType, hasCode, hasTable, hasFormula });
   } else if (wc > 0 && results.length > 0) {
     // Merge short tail into previous chunk
     results[results.length - 1].content += "\n" + content;
