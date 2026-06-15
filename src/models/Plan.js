@@ -46,9 +46,10 @@ const planSchema = new mongoose.Schema({
   // 'imported'      → Sao chép về từ Marketplace hoặc link chia sẻ
   // 'assigned'      → Giáo viên được giao hướng dẫn (có instructorId)
   // 'shared_import' → Dạng chia sẻ riêng tư (link private share)
+  // 'manual'        → Giảng viên tự tạo thủ công (khung rỗng, không cần tài liệu AI)
   sourceType: {
     type: String,
-    enum: ['self', 'imported', 'assigned', 'shared_import'],
+    enum: ['self', 'imported', 'assigned', 'shared_import', 'manual'],
     default: 'self'
   },
 

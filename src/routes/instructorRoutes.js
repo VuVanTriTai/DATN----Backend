@@ -45,6 +45,10 @@ router.post("/lesson/:lessonId/draft", verifyToken, checkRole(['instructor']), i
 // Gửi bản chỉnh sửa hoàn chỉnh cho học viên (merge draft → lesson + plan.status='reviewed')
 router.post("/course/:planId/send-back", verifyToken, checkRole(['instructor']), instructorController.finalizeReview);
 
+// Tạo khoá học thủ công (khung rỗng, không cần tài liệu AI)
+// POST /api/instructor/manual-course
+router.post("/manual-course", instructorController.createManualCourse);
+
 
 
 

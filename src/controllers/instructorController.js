@@ -306,6 +306,61 @@ const finalizeReview = async (req, res) => {
   }
 };
 
+/**
+ * 6. Giảng viên tạo khoá học thủ công (khung rỗng, không cần AI)
+ * POST /api/instructor/manual-course
+ * Body: { title, duration }
+ */
+const createManualCourse = async (req, res) => {
+  try {
+    const instructorId = req.user.id;
+    const { title, duration } = req.body;
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ success: false, message: "Tiêu đề khoá học không được để trống." });
+    }
+    const numDays = Math.max(1, Math.min(30, parseInt(duration, 10) || 7));
+
+    // 1. Tạo Plan mới — owner là chính giảng viên, không có instructorId riêng
+    const newPlan = await Plan.create({
+      title: title.trim(),
+      owner: instructorId,
+      instructorId: null,
+      duration: numDays,
+      sourceType: "manual",
+      status: "pending",
+      isDeleted: false,
+      deletedByOwner: false,
+      deletedByInstructor: false,
+    });
+
+    // 2. Tạo N bài học rỗng
+    const lessons = Array.from({ length: numDays }, (_, i) => ({
+      planId: newPlan._id,
+      dayNumber: i + 1,
+      title: `Ngày ${i + 1}`,
+      content: "",
+      summary: "",
+      importantNotes: [],
+      quiz: [],
+      quizPool: [],
+      status: "pending",
+      isDeleted: false,
+    }));
+
+    await Lesson.insertMany(lessons);
+
+    return res.status(201).json({
+      success: true,
+      message: `Đã tạo khoá học thủ công "${newPlan.title}" với ${numDays} bài học.`,
+      data: { planId: newPlan._id },
+    });
+  } catch (error) {
+    console.error("🔥 createManualCourse error:", error);
+    return res.error(error.message, 500);
+  }
+};
+
 module.exports = {
     getMyCourses,
     getCourseDashboardStats,
@@ -314,5 +369,6 @@ module.exports = {
     getStudentProgress,
     updateStudentLesson,
     saveLessonDraft,
-    finalizeReview
+    finalizeReview,
+    createManualCourse,
 };
