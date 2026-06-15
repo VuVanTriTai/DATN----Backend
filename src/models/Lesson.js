@@ -6,7 +6,6 @@
 
 const mongoose = require('mongoose');
 
-// 📝 SCHEMA CON: Định nghĩa một câu hỏi trắc nghiệm trong ngân hàng câu hỏi (quizPool)
 const QuizPoolItem = new mongoose.Schema({
   question:      { type: String, required: true }, // Nội dung câu hỏi
   options:       [{ type: String }],               // 4 đáp án lựa chọn
@@ -14,6 +13,7 @@ const QuizPoolItem = new mongoose.Schema({
   explanation:   { type: String, default: '' },    // Lời giải thích tại sao đúng
   difficulty:    { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' }, // Độ khó
   bloomLevel:    { type: String, default: 'Thông hiểu' }, // Thang đo Bloom (Biết, Hiểu, Vận dụng,...)
+  questionType:  { type: String, enum: ['singleChoice', 'multipleStatements'], default: 'singleChoice' }, // Loại câu hỏi
 }, { _id: false });
 
 const lessonSchema = new mongoose.Schema({
@@ -43,21 +43,6 @@ const lessonSchema = new mongoose.Schema({
 
     // Mảng quiz cũ (hỗ trợ tương thích ngược)
     quiz: [mongoose.Schema.Types.Mixed],
-
-    // ── LAZY QUIZ GENERATION ────────────────────────────────────────────────
-    // Quiz không được tạo ngay khi tạo khóa học (để giảm thời gian tạo ~40-50%).
-    // Thay vào đó quiz sẽ được sinh ON-DEMAND khi học viên lần đầu mở bài học.
-    // Trạng thái:
-    //   'pending'    → Chưa tạo quiz (mặc định khi bài học mới được sinh ra)
-    //   'generating' → Đang tạo quiz (tránh gọi API trùng lặp)
-    //   'ready'      → Quiz đã được tạo và lưu vào trường quiz[]
-    quizStatus: {
-      type: String,
-      enum: ['pending', 'generating', 'ready'],
-      default: 'pending',
-    },
-    // ────────────────────────────────────────────────────────────────────────
-
 
     // ── HỌC TẬP THÍCH ỨNG (Adaptive Learning) ───────────────────
     // Ngân hàng câu hỏi trắc nghiệm lớn (20-30 câu). AI sẽ tự động chọn lọc câu hỏi

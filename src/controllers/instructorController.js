@@ -12,12 +12,12 @@ const getMyCourses = async (req, res) => {
     try {
         const instructorId = req.user.id;
 
-        // Tìm các lộ trình mà user này được gán làm instructor và có trạng thái đang dạy hoặc đã duyệt
-        // Loại bỏ các lộ trình gốc tự học của chính họ khi chuyển chế độ
+        // Tìm các lộ trình mà user này được gán làm instructor HOẶC user này là owner (tự tạo/clone)
         const courses = await Plan.find({ 
-            instructorId: instructorId,
-            deletedByInstructor: { $ne: true },
-            status: { $in: ["teaching", "reviewed"] },
+            $or: [
+                { instructorId: instructorId, deletedByInstructor: { $ne: true } },
+                { owner: instructorId, deletedByOwner: { $ne: true } }
+            ],
             isDeleted: false
         }).populate("owner", "fullName email");
 
@@ -213,13 +213,12 @@ const saveLessonDraft = async (req, res) => {
     const newPlan = await Plan.create({
       title: `${sourcePlan.title} (Bản sao của GV)`,
       owner: req.user.id,
-      studentId: sourcePlan.studentId || sourcePlan.owner, // Đảm bảo giữ vết học viên gốc
-      instructorId: req.user.id, // Gán giáo viên hiện tại làm người hướng dẫn
+      instructorId: null, // Không còn là khóa hướng dẫn nữa, đây là khóa của riêng GV
       documentId: sourcePlan.documentId,
       duration: sourcePlan.duration,
       learningGoals: sourcePlan.learningGoals,
       documentMetadata: sourcePlan.documentMetadata,
-      sourceType: "assigned", 
+      sourceType: "self", // Đánh dấu là khóa tự biên soạn (enum hợp lệ: 'self')
       sharedWith: [],
       deletedByOwner: false,
       deletedByInstructor: false
@@ -298,143 +297,13 @@ const finalizeReview = async (req, res) => {
 
     await Promise.all(mergeOps);
 
-    // 3. Cập nhật trạng thái plan và chuyển giao quyền sở hữu lại cho học viên gốc nếu giáo viên đang là owner
-    const plan = await Plan.findById(planId);
-    if (!plan) return res.error("Không tìm thấy lộ trình", 404);
-
-    const targetStudentId = plan.studentId || plan.owner;
-
-    plan.status = 'reviewed';
-    plan.sourceType = 'assigned';
-    
-    // Nếu giáo viên đang sở hữu (bản clone mới từ saveLessonDraft) -> bàn giao lại cho học viên gốc
-    if (plan.owner.toString() !== targetStudentId.toString()) {
-      plan.owner = targetStudentId;
-      plan.instructorId = req.user.id;
-    }
-
-    await plan.save();
-
-    // 4. Đồng bộ hóa hoặc tạo mới Enrollment cho học viên đối với lộ trình được duyệt
-    let enrollment = await Enrollment.findOne({ learnerId: targetStudentId, planId: plan._id });
-    if (!enrollment) {
-      await Enrollment.create({
-        learnerId: targetStudentId,
-        instructorId: req.user.id,
-        planId: plan._id,
-        status: "active"
-      });
-    } else if (enrollment.status !== "active") {
-      enrollment.status = "active";
-      await enrollment.save();
-    }
+    // 3. Cập nhật trạng thái plan thành 'reviewed' và chuyển sourceType thành 'assigned' để hiển thị ở tab "Giáo viên gửi"
+    await Plan.findByIdAndUpdate(planId, { status: 'reviewed', sourceType: 'assigned' });
 
     return res.success(null, "Đã gửi bản chỉnh sửa hoàn chỉnh cho học viên.");
   } catch (error) {
     return res.error(error.message, 500);
   }
-};
-
-// Thêm ngày học mới vào lộ trình (Có hỗ trợ chèn giữa các ngày)
-const addLesson = async (req, res) => {
-    try {
-        const { planId } = req.params;
-        const { afterDayNumber } = req.body;
-        const instructorId = req.user.id;
-
-        // Check if plan exists and user is instructor or owner
-        const plan = await Plan.findOne({
-            _id: planId,
-            $or: [{ instructorId }, { owner: instructorId }]
-        });
-        if (!plan) {
-            return res.status(404).json({ success: false, message: "Không tìm thấy lộ trình hoặc bạn không có quyền." });
-        }
-
-        // Đếm tổng số bài học hiện có
-        const lessonsCount = await Lesson.countDocuments({ planId, isDeleted: false });
-        let dayNumber;
-
-        if (afterDayNumber !== undefined && afterDayNumber !== null) {
-            const parsedAfter = parseInt(afterDayNumber);
-            dayNumber = parsedAfter + 1;
-
-            // Đẩy tất cả các bài học đứng sau ngày này tăng lên 1 đơn vị
-            await Lesson.updateMany(
-                { planId, dayNumber: { $gt: parsedAfter }, isDeleted: false },
-                { $inc: { dayNumber: 1 } }
-            );
-        } else {
-            dayNumber = lessonsCount + 1;
-        }
-
-        const newLesson = await Lesson.create({
-            planId,
-            dayNumber,
-            title: `Bài học mới Ngày ${dayNumber}`,
-            content: `## Nội dung bài học Ngày ${dayNumber}\n\nNhập nội dung chi tiết bài học ở đây...`,
-            summary: `Tóm tắt bài học Ngày ${dayNumber}`,
-            importantNotes: ["Điểm trọng tâm 1"],
-            quizPool: [],
-            status: "locked"
-        });
-
-        // Update plan duration
-        plan.duration = lessonsCount + 1;
-        await plan.save();
-
-        return res.success(newLesson, "Đã thêm ngày học mới thành công.");
-    } catch (error) {
-        return res.error(error.message, 500);
-    }
-};
-
-// Xóa ngày học khỏi lộ trình
-const deleteLesson = async (req, res) => {
-    try {
-        const { lessonId } = req.params;
-        const instructorId = req.user.id;
-
-        // Find the lesson first
-        const lessonToDelete = await Lesson.findById(lessonId);
-        if (!lessonToDelete) {
-            return res.status(404).json({ success: false, message: "Không tìm thấy bài học." });
-        }
-
-        // Check plan permission
-        const plan = await Plan.findOne({
-            _id: lessonToDelete.planId,
-            $or: [{ instructorId }, { owner: instructorId }]
-        });
-        if (!plan) {
-            return res.status(404).json({ success: false, message: "Không có quyền chỉnh sửa lộ trình này." });
-        }
-
-        // Soft delete the lesson
-        lessonToDelete.isDeleted = true;
-        await lessonToDelete.save();
-
-        // Reorder remaining lessons
-        const remainingLessons = await Lesson.find({ planId: plan._id, isDeleted: false }).sort({ dayNumber: 1 });
-        
-        // Update dayNumbers to be contiguous
-        const updatePromises = remainingLessons.map(async (lesson, index) => {
-            const newDayNumber = index + 1;
-            if (lesson.dayNumber !== newDayNumber) {
-                lesson.dayNumber = newDayNumber;
-                return lesson.save();
-            }
-        });
-        await Promise.all(updatePromises);
-
-        // Update plan duration
-        plan.duration = remainingLessons.length;
-        await plan.save();
-
-        return res.success(null, "Đã xóa bài học thành công và cập nhật lại lộ trình.");
-    } catch (error) {
-        return res.error(error.message, 500);
-    }
 };
 
 module.exports = {
@@ -445,7 +314,5 @@ module.exports = {
     getStudentProgress,
     updateStudentLesson,
     saveLessonDraft,
-    finalizeReview,
-    addLesson,
-    deleteLesson
+    finalizeReview
 };

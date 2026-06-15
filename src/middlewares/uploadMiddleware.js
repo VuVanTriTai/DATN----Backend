@@ -1,7 +1,7 @@
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const archiver = require('archiver');
+const { ZipArchive } = require('archiver');
 const cloudinary = require('cloudinary').v2;
 
 // Configure Cloudinary using env variables (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET)
@@ -33,9 +33,16 @@ const fileFilter = (req, file, cb) => {
     'application/msword', 
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 
     'application/vnd.openxmlformats-officedocument.presentationml.presentation', 
+    // Image support
+    'image/png',
+    'image/jpeg',
+    'image/jpg',
+    'image/gif',
+    'image/webp',
+    'image/svg+xml'
   ];
 
-  if (allowedMimeTypes.includes(file.mimetype)) {
+  if (allowedMimeTypes.includes(file.mimetype) || file.mimetype.startsWith('image/')) {
     cb(null, true);
   } else {
     cb(new Error(`Định dạng file ${file.mimetype} không được hỗ trợ.`), false);
@@ -50,23 +57,11 @@ const multerLocal = multer({
 
 const uploadLocal = multerLocal;
 
-const cleanupTempFiles = (files = []) => {
-  const uniqueFiles = [...new Set(files.filter(Boolean))];
-  for (const tempFile of uniqueFiles) {
-    if (!fs.existsSync(tempFile)) continue;
-    try {
-      fs.unlinkSync(tempFile);
-    } catch (err) {
-      console.warn(`[Upload] Cannot cleanup temp file ${tempFile}:`, err.message);
-    }
-  }
-};
-
 // Helper to zip file
 const zipFile = (sourcePath, destPath, fileNameInZip) => {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(destPath);
-    const archive = archiver('zip', { zlib: { level: 9 } });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
 
     output.on('close', () => resolve(destPath));
     archive.on('error', (err) => reject(err));
@@ -86,15 +81,11 @@ const upload = {
         if (err) return next(err);
         if (!req.file) return next();
 
-        let tempFilesToCleanup = [];
         try {
           let filePathToUpload = req.file.path;
           const originalSize = req.file.size;
-          const originalName = req.file.originalname;
-          const originalMimeType = req.file.mimetype;
-          const originalLocalPath = req.file.path;
-          let resourceType = 'raw';
-          tempFilesToCleanup = [req.file.path];
+          let resourceType = req.file.mimetype.startsWith('image/') ? 'image' : 'raw';
+          let tempFilesToCleanup = [req.file.path];
 
           // Check size > 10MB
           if (originalSize > 10 * 1024 * 1024) {
@@ -103,6 +94,8 @@ const upload = {
             await zipFile(filePathToUpload, zippedPath, req.file.originalname);
             filePathToUpload = zippedPath;
             tempFilesToCleanup.push(zippedPath);
+            req.file.originalname = req.file.originalname + '.zip'; // update name
+            req.file.mimetype = 'application/zip';
           }
 
           // Step 2: Upload to Cloudinary
@@ -118,19 +111,20 @@ const upload = {
           req.file.path = result.secure_url;
           req.file.location = result.secure_url; // Some controllers use location
           req.file.cloudinaryId = result.public_id;
-          req.file.localPath = originalLocalPath;
-          req.file.originalname = originalName;
-          req.file.mimetype = originalMimeType;
-
-          res.once('finish', () => cleanupTempFiles(tempFilesToCleanup));
-          res.once('close', () => cleanupTempFiles(tempFilesToCleanup));
+          
+          // Cleanup local files
+          for (const tempFile of tempFilesToCleanup) {
+            if (fs.existsSync(tempFile)) {
+              fs.unlinkSync(tempFile);
+            }
+          }
 
           console.log(`[Upload] Upload successful: ${result.secure_url}`);
           next();
         } catch (uploadErr) {
           console.error("[Upload] Cloudinary upload error:", uploadErr);
           // Cleanup
-          cleanupTempFiles(tempFilesToCleanup.length ? tempFilesToCleanup : [req.file?.path]);
+          if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
           return res.status(500).json({ success: false, message: "File upload failed", error: uploadErr.message });
         }
       });

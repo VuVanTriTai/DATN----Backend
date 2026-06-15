@@ -9,7 +9,7 @@ const { rewriteQuery } = require("../utils/queryRewrite");
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const MAX_CONTEXT_CHARS = 14000;
+const MAX_CONTEXT_CHARS = 10000;  // giảm từ 14000 → 10000 để tránh tràn context với tài liệu học thuật dài
 const MAX_HISTORY_TURNS = 6;
 
 // ─────────────────────────────────────────────
@@ -112,7 +112,8 @@ const answerQuestionWithRAG = async (
 
         // 5. LLM
         const res = await groq.chat.completions.create({
-            model: "llama-3.1-8b-instant",
+        // dùng 70b model để hiểu tài liệu học thuật/khoa học chính xác hơn
+        model: "llama-3.3-70b-versatile",
             temperature: 0.1,
             max_tokens: 1200,
             messages,

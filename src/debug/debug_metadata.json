@@ -1,25 +1,23 @@
 {
-  "fileName": "CÆ¡ sá» dá»¯ liá»u nÃ¢ng cao 1.docx",
+  "fileName": "DB - Lesson 04.docx",
   "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "wordCount": 3071,
-  "lineCount": 198,
-  "tableCount": 8,
+  "wordCount": 2402,
+  "lineCount": 1940,
+  "tableCount": 0,
   "extractMethod": "docling",
   "pages": 0,
-  "headingCount": 21,
+  "headingCount": 2,
   "hasFormulas": true,
   "codeBlockCount": 0,
-  "bulletItemCount": 1,
-  "estimatedComplexity": "high",
-  "qualityIssues": [
-    "no_headings"
-  ],
+  "bulletItemCount": 6,
+  "estimatedComplexity": "low",
+  "qualityIssues": [],
   "qualityStats": {
-    "words": 3009,
-    "headingCount": 1,
-    "shortRatio": 9,
-    "viRatio": 7.1,
-    "gluedRatio": 3,
+    "words": 2274,
+    "headingCount": 2,
+    "shortRatio": 44,
+    "viRatio": 13.8,
+    "gluedRatio": 2,
     "isSlidePdf": false
   }
 }

@@ -3,9 +3,6 @@ const User = require("../models/User");
 
 const verifyToken = async (req, res, next) => {
   // 1. Lấy mã Token từ header "Authorization" của request
-  // Header thường có dạng: "Authorization: Bearer <Token>", nên ta cần tách lấy phần <Token> 
-  // sau chữ "Bearer "
-  // Lưu ý: Nếu header không tồn tại hoặc không đúng định dạng, token sẽ là undefined
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];// Tách chữ 
   // "Bearer <Token>" lấy phần sau

@@ -21,40 +21,16 @@
 
 const fs = require("fs");
 const path = require("path");
-const mongoose = require("mongoose");
 
 const Groq = require("groq-sdk");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
-// Nạp danh sách các khóa Groq từ file .env
-const groqKeys = [
-  process.env.GROQ_API_KEY,
-  process.env.GROQ_API_KEY_2,
-  process.env.GROQ_API_KEY_3,
-  process.env.GROQ_API_KEY_4,
-  process.env.GROQ_API_KEY_5
-].filter(Boolean);
-
-let currentGroqKeyIndex = 0;
-let groq = new Groq({ apiKey: groqKeys[0] || process.env.GROQ_API_KEY });
-
-const rotateGroqClient = () => {
-  if (groqKeys.length <= 1) return;
-  currentGroqKeyIndex = (currentGroqKeyIndex + 1) % groqKeys.length;
-  console.log(`[Groq Rotation] Xoay vòng sang Groq API Key #${currentGroqKeyIndex + 1}: ${groqKeys[currentGroqKeyIndex].slice(0, 8)}...`);
-  groq = new Groq({ apiKey: groqKeys[currentGroqKeyIndex] });
-};
-
-// Khởi tạo Gemini client làm Ultimate Fallback
-const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // ─────────────────────────────
 // SERVICES
 // ─────────────────────────────
 const { generateEmbedding } = require("./embeddingService");
 const { searchRelevantChunks, searchChunksBySection } = require("./vectorSearchService");
-// ⚠️ getLearningMode đã bị xóa: UI mới không còn dùng REMEDIAL/NORMAL/ADVANCED
-// Persona giờ được xác định trực tiếp từ profile.depth (basic/deep)
+const { getLearningMode } = require("./userContextService");
 const { generateLessonMeta } = require('./aiService'); // Hoặc đường dẫn tương ứng
 const { validateDocument } = require('./docValidationService');
 // ─────────────────────────────
@@ -65,7 +41,7 @@ const Chunk = require("../models/Chunk");
 // ─────────────────────────────
 // TEXT PROCESSING
 // ─────────────────────────────
-const { cleanText, fixOcrGluedWords } = require("../utils/cleanText");
+const { cleanText } = require("../utils/cleanText");
 
 // ✅ LUÔN GIỮ fallback (QUAN TRỌNG)
 const { chunkText, mergeBrokenNumberedHeadings, splitIntoPropositions } = require("../utils/chunkText");
@@ -81,11 +57,6 @@ const DAYS_MIN = 1;
 const DAYS_MAX = 14;
 const MAX_ANALYZE_TEXT = 3500;  // ↓ giảm từ 5000 → 3500 để tiết kiệm token
 const MODEL_FAST = "llama-3.1-8b-instant";
-const GROQ_MAX_RPM_RETRIES = Number(process.env.GROQ_MAX_RPM_RETRIES || 1);
-const GROQ_RPM_WAIT_MS = Number(process.env.GROQ_RPM_WAIT_MS || 5000);
-const GROQ_REQUEST_TIMEOUT_MS = Number(process.env.GROQ_REQUEST_TIMEOUT_MS || 45000);
-const COURSE_LESSON_DELAY_MS = Number(process.env.COURSE_LESSON_DELAY_MS || 0);
-const DEBUG_CHUNKS_PATH = path.join(__dirname, "../debug/debug_chunks_saved.json");
 
 
 
@@ -95,7 +66,8 @@ let aiChunkText;
 let detectMissingContent;
 
 try {
-  ({ aiChunkText } = require("./aiChunkService"));
+  // ✅ FIX: đường dẫn đúng — aiChunkService.js không tồn tại
+  ({ aiChunkText } = require("../utils/aiChunker"));
 } catch (_) {
   aiChunkText = async () => [];
 }
@@ -112,12 +84,20 @@ try {
 // const MODEL_FAST  = "llama-3.1-8b-instant";
 const MODEL_SMART = "llama-3.3-70b-versatile";
 
-// [Chức năng chuyển model đã bị loại bỏ theo yêu cầu để tránh lặp các model Groq lỗi và fallback thẳng sang Gemini]
+// ━━ MODEL FALLBACK CHAIN (theo thứ tự ưu tiên) ━━
+// Khi model đầu bị TPD/RPM limit → tự động chuyển sang model kế tiếp
+const GROQ_MODEL_CHAIN = [
+  "llama-3.1-8b-instant",   // Nhanh nhất, tiêu ít token nhất
+  "llama3-8b-8192",         // Fallback 1: llama3 cũ hơn, quota riêng
+  "mixtral-8x7b-32768",     // Fallback 2: chất lượng tốt, hỗ trợ JSON mode
+  "llama-3.3-70b-versatile",// Fallback 3: mạnh nhất, dùng khi tất cả fast model đều hết
+];
 
 // Models hỗ trợ response_format: { type: 'json_object' }
 // gemma2-9b-it KHÔNG nằm trong list này vì không hỗ trợ JSON mode
 const GROQ_JSON_MODELS = new Set([
   "llama-3.1-8b-instant",
+  "llama-3.1-70b-versatile",
   "llama-3.3-70b-versatile",
   "llama3-8b-8192",
   "llama3-70b-8192",
@@ -125,13 +105,12 @@ const GROQ_JSON_MODELS = new Set([
 ]);
 
 const MAX_CONTEXT_CHARS = 9500;
-const MAX_SYLLABUS_TEXT = 8000;  // Tăng lên 35000 để bao phủ trọn vẹn tài liệu lớn nhiều chương khi lập syllabus
+const MAX_SYLLABUS_TEXT = 7000;  // ↓ giảm từ 10000 → 7000 để tiết kiệm token
 
 //const MAX_ANALYZE_TEXT   = 5000;
 
-const CHUNK_SEARCH_K = 12;
-const CHUNK_USE_K = 8;
-const EMBEDDING_STAGGER_MS = Number(process.env.EMBEDDING_STAGGER_MS || 400);
+const CHUNK_SEARCH_K = 10;  // ✅ FIX: tăng để tìm nhiều chunk hơn
+const CHUNK_USE_K = 6;   // ✅ FIX: tăng để có nhiều context hơn, tránh mất ví dụ
 const CHUNK_SCORE_THRESHOLD = 0.30; // ✅ FIX: giảm ngưỡng để giữ lại chunk có code
 
 
@@ -143,10 +122,13 @@ const MIN_CHUNK_WORDS = 40;
 // ─────────────────────────────
 // LESSON BUDGET
 // ─────────────────────────────
-// targetWords: hướng dẫn AI viết bao nhiêu từ/bài — để bài đủ sâu, không quá ngắn
-const LESSON_BUDGET_SHORT = { contentTokens: 2800, metaTokens: 1800, targetWords: "600-900", useSmarter: true };
-const LESSON_BUDGET_MEDIUM = { contentTokens: 2400, metaTokens: 1600, targetWords: "500-750", useSmarter: false };
-const LESSON_BUDGET_NORMAL = { contentTokens: 2200, metaTokens: 1600, targetWords: "450-700", useSmarter: false };
+// Dùng MODEL_SMART (70b) cho tất cả budget:
+// 1. Tài liệu học thuật/khoa học cần reasoning sâu
+// 2. Prompt ~7000 tokens → 8b model (8192 ctx limit) không còn đủ buffer cho output
+// 3. Token budget bị giới hạn chặt (1800-2600) nên chi phí 70b vẫn chấp nhận được
+const LESSON_BUDGET_SHORT  = { contentTokens: 2600, metaTokens: 1800, targetWords: "500-700", useSmarter: true };
+const LESSON_BUDGET_MEDIUM = { contentTokens: 2400, metaTokens: 1800, targetWords: "380-540", useSmarter: true };
+const LESSON_BUDGET_NORMAL = { contentTokens: 2200, metaTokens: 1800, targetWords: "300-460", useSmarter: true };
 
 const getDynamicLessonBudget = (totalDays) => {
   if (totalDays <= 3) return LESSON_BUDGET_SHORT;
@@ -154,8 +136,8 @@ const getDynamicLessonBudget = (totalDays) => {
   return LESSON_BUDGET_NORMAL;
 };
 
-const HARD_CAP_FAST = 3000;
-const HARD_CAP_SMART = 5000;
+const HARD_CAP_FAST = 1800;
+const HARD_CAP_SMART = 2800;
 
 // ─────────────────────────────
 // BLOOM TAXONOMY
@@ -216,192 +198,79 @@ const parse429WaitMs = (errMsg) => {
     return ms > 0 ? ms + 2000 : 0;
   } catch { return 0; }
 };
-const callGeminiFallback = async (buildParams) => {
-  if (!genAI) {
-    console.error("[Gemini Fallback] Gemini API Key chưa được cấu hình.");
-    return null;
-  }
 
-  console.log("🚀 [Gemini Fallback] Kích hoạt Gemini 1.5 Flash làm Ultimate Fallback...");
-  try {
-    const sampleParams = buildParams("llama-3.3-70b-versatile", 0);
-    const messages = sampleParams.messages || [];
+const callGroqWithFallback = async (buildParams, startModel = MODEL_FAST) => {
+  const chainStart = GROQ_MODEL_CHAIN.indexOf(startModel);
+  const modelChain = chainStart >= 0
+    ? GROQ_MODEL_CHAIN.slice(chainStart)
+    : [startModel, ...GROQ_MODEL_CHAIN];
 
-    let systemInstruction = "";
-    let userPrompt = "";
+  let lastErr;
 
-    messages.forEach(msg => {
-      if (msg.role === "system") {
-        systemInstruction += msg.content + "\n";
-      } else {
-        userPrompt += `${msg.role}: ${msg.content}\n`;
-      }
-    });
-
-    const modelInstance = genAI.getGenerativeModel({
-      model: "gemini-flash-latest",
-      systemInstruction: systemInstruction.trim() || undefined,
-    });
-
-    const temperature = sampleParams.temperature !== undefined ? sampleParams.temperature : 0.2;
-    const enforceJSON = !!sampleParams.response_format ||
-      messages.some((msg) => /json/i.test(String(msg?.content || "")));
-
-    const requestedTokens = sampleParams.max_tokens || 2048;
-    const safeTokens = Math.min(8192, Math.max(requestedTokens, 4096));
-
-    const generationConfig = {
-      temperature,
-      maxOutputTokens: safeTokens,
-      responseMimeType: enforceJSON ? "application/json" : "text/plain",
-    };
-
-    const result = await modelInstance.generateContent({
-      contents: [{ role: "user", parts: [{ text: userPrompt.trim() }] }],
-      generationConfig,
-    });
-
-    let resText = result.response.text();
-    if (!resText) throw new Error("Gemini response is empty");
-
-    resText = resText.trim();
-
-    // Chỉ strip preamble/postamble nếu request là JSON
-    // Plain text request (bài giảng Markdown) KHÔNG strip vì không có { hay [
-    if (enforceJSON) {
-      const jsonStartBrace = resText.indexOf('{');
-      const jsonStartBracket = resText.indexOf('[');
-      const jsonStart = [jsonStartBrace, jsonStartBracket]
-        .filter(i => i >= 0)
-        .reduce((min, i) => Math.min(min, i), Infinity);
-
-      if (jsonStart > 0 && jsonStart !== Infinity) {
-        const preamble = resText.slice(0, jsonStart);
-        // Strip CHỈ khi preamble là text thuần (không chứa ký tự JSON)
-        if (!/[{[\]}":]/.test(preamble)) {
-          console.warn(`[Gemini] Strip preamble (${jsonStart} chars):`, preamble.slice(0, 60));
-          resText = resText.slice(jsonStart);
-        }
-      }
-
-      const jsonEndBrace = resText.lastIndexOf('}');
-      const jsonEndBracket = resText.lastIndexOf(']');
-      const jsonEnd = Math.max(jsonEndBrace, jsonEndBracket);
-      if (jsonEnd > 0 && jsonEnd < resText.length - 1) {
-        const postamble = resText.slice(jsonEnd + 1);
-        if (!/[{[\]}":]/.test(postamble)) {
-          resText = resText.slice(0, jsonEnd + 1);
-        }
-      }
-
-      if (!resText) throw new Error("Gemini response empty after strip");
+  for (let mi = 0; mi < modelChain.length; mi++) {
+    const activeModel = modelChain[mi];
+    if (mi > 0) {
+      console.warn(`[Groq] "${modelChain[mi - 1]}" bị limit → chuyển ngay sang "${activeModel}"`);
     }
 
-    console.log("✅ [Gemini Fallback] Sinh nội dung thành công từ Gemini!");
-    return resText;
-  } catch (geminiErr) {
-    console.error("❌ [Gemini Fallback] Lỗi khi gọi Gemini API:", geminiErr.message);
-    throw geminiErr;
-  }
-};
-const callGroqWithFallback = async (buildParams, startModel = MODEL_FAST) => {
-  let lastErr;
-  const maxKeyAttempts = Math.max(1, groqKeys.length);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const params = buildParams(activeModel, attempt);
+        const res = await groq.chat.completions.create(params);
+        const content = res?.choices?.[0]?.message?.content;
+        if (!content || typeof content !== 'string') throw new Error('Empty Groq response');
+        return content;
+      } catch (err) {
+        lastErr = err;
+        const msg = String(err?.message || '');
+        const status = err?.status || err?.response?.status || 0;
+        const is429 = /429|rate_limit/i.test(msg) || status === 429;
+        const isTPD = /tokens per day|tpd/i.test(msg);
+        const isRPM = /tokens per minute|rpm|requests per minute/i.test(msg);
+        const isModelCapErr = /response_format|not support|unsupported|does not support/i.test(msg)
+          || status === 400;
 
-  for (let keyAttempt = 0; keyAttempt < maxKeyAttempts; keyAttempt++) {
-    try {
-      const activeModel = startModel;
-
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const params = buildParams(activeModel, attempt);
-
-          // ✅ FIX: Groq SDK không nhận field "timeout" → xóa trước khi gọi
-          delete params.timeout;
-
-          const res = await groq.chat.completions.create(params);
-          const content = res?.choices?.[0]?.message?.content;
-          if (!content || typeof content !== 'string') throw new Error('Empty Groq response');
-          return content;
-        } catch (err) {
-          lastErr = err;
-          const msg = String(err?.message || '');
-          const status = err?.status || err?.response?.status || 0;
-          const is429 = /429|rate_limit/i.test(msg) || status === 429;
-          const isTPD = /tokens per day|tpd/i.test(msg);
-          const isRPM = /tokens per minute|rpm|requests per minute/i.test(msg);
-          const isModelCapErr = /response_format|not support|unsupported|does not support/i.test(msg);
-
-          if (isTPD) {
-            console.error(`[Groq] ${activeModel} hết TPD trên Key #${currentGroqKeyIndex + 1}.`);
-            if (groqKeys.length > 1 && keyAttempt < maxKeyAttempts - 1) {
-              rotateGroqClient();
-              throw new Error("ROTATE_KEY");
-            }
-            break;
-          }
-
-          if (isModelCapErr) {
-            console.warn(`[Groq] "${activeModel}" không hỗ trợ tính năng. Chuyển sang Gemini.`);
-            break;
-          }
-
-          if (isRPM && attempt < GROQ_MAX_RPM_RETRIES) {
-            const wait = Math.min(parse429WaitMs(msg) || GROQ_RPM_WAIT_MS, GROQ_RPM_WAIT_MS);
-            console.warn(`[Groq] "${activeModel}" RPM limit. Đợi ${wait / 1000}s rồi thử lại...`);
-            await sleep(wait);
-            continue;
-          }
-
-          if (isRPM) {
-            console.warn(`[Groq] "${activeModel}" vẫn bị RPM limit. Chuyển sang Gemini.`);
-            break;
-          }
-
-          if (/timeout|json|parse|empty/i.test(msg) && attempt < 2) {
-            await sleep(2000 + 1000 * attempt);
-            continue;
-          }
-
-          if (is429 && !isTPD && !isRPM && attempt < 1) {
-            if (groqKeys.length > 1 && keyAttempt < maxKeyAttempts - 1) {
-              rotateGroqClient();
-              throw new Error("ROTATE_KEY");
-            }
-            await sleep(5000);
-            continue;
-          }
-
-          if (!is429 && !/timeout|json|parse|empty/i.test(msg) && status >= 400) {
-            console.warn(`[Groq] "${activeModel}" lỗi ${status}: ${msg.slice(0, 80)}. Chuyển sang Gemini.`);
-            break;
-          }
-
+        if (isTPD) {
+          console.error(`[Groq] ${activeModel} hết TPD (Tokens Per Day). Vui lòng thử lại sau.`);
           break;
         }
+
+        if (isModelCapErr) {
+          console.warn(`[Groq] "${activeModel}" không hỗ trợ tính năng → thử model tiếp`);
+          break;
+        }
+
+        if (isRPM && attempt < 2) {
+          const wait = 15000 * (attempt + 1);
+          console.warn(`[Groq] "${activeModel}" RPM limit. Đợi ${wait / 1000}s...`);
+          await sleep(wait);
+          continue;
+        }
+
+        if (/timeout|json|parse|empty/i.test(msg) && attempt < 2) {
+          await sleep(2000 + 1000 * attempt);
+          continue;
+        }
+
+        if (is429 && !isTPD && !isRPM && attempt < 1) {
+          await sleep(5000);
+          continue;
+        }
+
+        // Lỗi 4xx không xác định → thử model tiếp
+        if (!is429 && !/timeout|json|parse|empty/i.test(msg) && status >= 400) {
+          console.warn(`[Groq] "${activeModel}" lỗi ${status}: ${msg.slice(0, 80)} → thử model tiếp`);
+          break;
+        }
+
+        break;
       }
-      break;
-    } catch (keyErr) {
-      if (keyErr.message === "ROTATE_KEY") {
-        continue;
-      }
-      throw keyErr;
     }
   }
 
-  console.error('[Groq] Yêu cầu thất bại hoặc hết quota TPD. Chuyển sang Gemini Fallback.');
-
-  if (genAI) {
-    try {
-      return await callGeminiFallback(buildParams);
-    } catch (geminiErr) {
-      console.error('[Ultimate Fallback] Gemini thất bại:', geminiErr.message);
-    }
-  }
-
+  console.error('[Groq] Toàn bộ model chain đều thất bại');
   throw lastErr;
 };
-
 
 // Giữ lại retryWithBackoff cho các caller khác (embedding, v.v.)
 
@@ -430,8 +299,8 @@ const retryWithBackoff = async (fn, maxRetries = 3) => {
 
 const makeGroqRequest = async ({
   messages,
-  model = MODEL_SMART,
-  temperature = 0.1,
+  model = MODEL_FAST,
+  temperature = 0.3,
   maxTokens = 2048,
   enforceJSON = true
 }) => {
@@ -443,11 +312,14 @@ const makeGroqRequest = async ({
     const hardCap = activeModel.includes('70b') ? HARD_CAP_SMART : HARD_CAP_FAST;
     const jsonBuf = enforceJSON ? 200 : 0;
     const safeMax = Math.max(256, Math.min(maxTokens - jsonBuf, hardCap) - attempt * 100);
+    // Chỉ dùng response_format nếu model hỗ trợ JSON mode
+    const supportsJsonMode = GROQ_JSON_MODELS.has(activeModel);
     return {
       messages,
       model: activeModel,
       temperature,
       max_tokens: safeMax,
+      ...(enforceJSON && supportsJsonMode ? { response_format: { type: 'json_object' } } : {})
     };
   }, model);
 };
@@ -458,7 +330,7 @@ const makeGroqRequest = async ({
 const makeGroqPlainRequest = async ({
   messages,
   model = MODEL_FAST,
-  temperature = 0.0,
+  temperature = 0.1,
   maxTokens = 1800
 }) => {
   if (!Array.isArray(messages) || messages.length === 0) {
@@ -477,123 +349,32 @@ const makeGroqPlainRequest = async ({
 // CORE UTILITIES (SAFE VERSION)
 // ─────────────────────────────────────────────
 
-const extractBalancedJSON = (input) => {
-  const source = String(input || "");
-  const objectStart = source.indexOf("{");
-  const arrayStart = source.indexOf("[");
-  const startCandidates = [objectStart, arrayStart].filter((idx) => idx >= 0);
-  if (!startCandidates.length) return source.trim();
-
-  const start = Math.min(...startCandidates);
-  const stack = [];
-  let inString = false;
-  let escaped = false;
-
-  for (let i = start; i < source.length; i++) {
-    const ch = source[i];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === "\"") {
-      inString = true;
-    } else if (ch === "{" || ch === "[") {
-      stack.push(ch);
-    } else if (ch === "}" || ch === "]") {
-      const open = stack[stack.length - 1];
-      const matches = (open === "{" && ch === "}") || (open === "[" && ch === "]");
-      if (!matches) continue;
-      stack.pop();
-      if (stack.length === 0) return source.slice(start, i + 1).trim();
-    }
-  }
-
-  return source.slice(start).trim();
-};
-
-const escapeRawNewlinesInJsonStrings = (json) => {
-  let out = "";
-  let inString = false;
-  let escaped = false;
-
-  for (const ch of String(json || "")) {
-    if (inString) {
-      if (escaped) {
-        out += ch;
-        escaped = false;
-      } else if (ch === "\\") {
-        out += ch;
-        escaped = true;
-      } else if (ch === "\"") {
-        out += ch;
-        inString = false;
-      } else if (ch === "\n") {
-        out += "\\n";
-      } else if (ch !== "\r") {
-        out += ch;
-      }
-      continue;
-    }
-
-    out += ch;
-    if (ch === "\"") inString = true;
-  }
-
-  return out;
-};
-
 const safeJSONParse = (text) => {
   if (!text || typeof text !== "string") {
     throw new Error("Empty AI response");
   }
 
   let cleaned = text
-    .replace(/^\uFEFF/, "")
     .replace(/```json/gi, "")
     .replace(/```/g, "")
-    .replace(/[“”]/g, "\"")
-    .replace(/[‘’]/g, "'")
     .trim();
 
-  // ✅ FIX: strip preamble text trước JSON (Gemini hay thêm "Here is...", "Sure!",...)
-  // Tìm vị trí { hoặc [ đầu tiên và cắt từ đó
-  const firstBrace = cleaned.indexOf('{');
-  const firstBracket = cleaned.indexOf('[');
-  const jsonStart = [firstBrace, firstBracket]
-    .filter(i => i >= 0)
-    .reduce((min, i) => Math.min(min, i), Infinity);
+  // Extract JSON block nếu bị lẫn text
+  const fb = cleaned.indexOf("{");
+  const lb = cleaned.lastIndexOf("}");
 
-  if (jsonStart > 0 && jsonStart !== Infinity) {
-    const preamble = cleaned.slice(0, jsonStart);
-    // Chỉ strip nếu phần trước là text thuần (không phải JSON hợp lệ bị hỏng)
-    if (!/[{[\]}]/.test(preamble)) {
-      console.warn(`[safeJSONParse] Strip preamble (${jsonStart} chars):`, preamble.slice(0, 60));
-      cleaned = cleaned.slice(jsonStart);
-    }
+  if (fb !== -1 && lb > fb) {
+    cleaned = cleaned.slice(fb, lb + 1);
   }
-
-  cleaned = extractBalancedJSON(cleaned);
 
   // Try parse lần 1
   try {
     return JSON.parse(cleaned);
   } catch (e1) { }
 
-  try {
-    return JSON.parse(escapeRawNewlinesInJsonStrings(cleaned));
-  } catch (_) { }
-
   // Fix lỗi comma / newline
   try {
-    const fixed = escapeRawNewlinesInJsonStrings(cleaned)
+    const fixed = cleaned
       .replace(/("\w+"\s*:\s*"[^"]*")\s*\n\s*"/g, '$1,\n"')
       .replace(/("\w+"\s*:\s*\d+)\s*\n\s*"/g, '$1,\n"')
       .replace(/,\s*}/g, "}")
@@ -642,44 +423,6 @@ const splitSentences = (text) =>
     .map(normalizeSpace)
     .filter((s) => s.length > 20);
 
-/**
- * Cắt context thông minh: giữ head + tail thay vì cắt thô.
- * Pattern từ embeddingService — tránh mất định nghĩa/ví dụ ở cuối chunk.
- *
- * @param {string} text     - Văn bản cần cắt
- * @param {number} maxChars - Giới hạn ký tự tối đa
- * @param {number} tailSize - Số ký tự đuôi luôn được giữ lại (mặc định 600)
- * @returns {string}
- */
-const smartTruncateContext = (text, maxChars, tailSize = 600) => {
-  const t = String(text || "").trim();
-  if (t.length <= maxChars) return t;
-
-  const headSize = maxChars - tailSize;
-  let head = t.slice(0, headSize);
-  const sepIdx = head.lastIndexOf("\n---\n");
-  const paraIdx = head.lastIndexOf("\n\n");
-  const spaceIdx = head.lastIndexOf(" ");
-
-  const cutAt = sepIdx > headSize * 0.6 ? sepIdx
-    : paraIdx > headSize * 0.6 ? paraIdx
-    : spaceIdx > headSize * 0.4 ? spaceIdx
-    : headSize;
-
-  head = head.slice(0, cutAt).trimEnd();
-
-  // Giữ tail từ ranh giới đoạn gần nhất
-  let tail = t.slice(-tailSize);
-  const tailSep = tail.indexOf("\n---\n");
-  const tailPara = tail.indexOf("\n\n");
-  const tailStart = tailSep >= 0 && tailSep < tailPara ? tailSep
-    : tailPara >= 0 ? tailPara
-    : 0;
-
-  tail = tail.slice(tailStart).trimStart();
-
-  return `${head}\n\n[...truncated...]\n\n${tail}`;
-};
 
 /**
  * Làm sạch section name từ chunk — loại bỏ section names là code/OCR rác.
@@ -691,11 +434,7 @@ const smartTruncateContext = (text, maxChars, tailSize = 600) => {
 const sanitizeSectionName = (section) => {
   if (!section || typeof section !== "string") return "";
 
-  let s = section.trim().replace(/^\*{1,3}/, "").replace(/\*{1,3}$/, "").trim();
-
-  // ✅ FIX: Strip ngoặc vuông bọc số mục TRƯỚC khi kiểm tra ký tự đặc biệt
-  // Ví dụ: "[1.2] Stored Procedure" → "1.2 Stored Procedure"
-  s = s.replace(/^\[(\d+(?:\.\d+)+)\]\s*/, "$1 ").trim();
+  const s = section.trim();
 
   // Section name là code fragment
   if (/\[OUTPUT|OUT\]/i.test(s)) return "";
@@ -727,149 +466,81 @@ const sanitizeSectionName = (section) => {
 //   "LEFT(VendorContactFName, 1) +"
 //   "/CAST(100 AS decimal"
 // ═══════════════════════════════════════════════════════════════════════════
-
+  
 const extractFormulaLikeNotes = (text) => {
   const lines = String(text || "")
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
-
+ 
   const results = [];
-
+ 
   for (const line of lines) {
-    // ── Bỏ qua separators ───────────────────────────────────────────────
+    // ── Bỏ qua dấu phân cách chunk ──────────────────────────────────────
     if (/^[-=─═]{2,}$/.test(line)) continue;
+ 
+    // ── Bỏ qua chunk metadata headers ───────────────────────────────────
     if (/^\[Context:/i.test(line)) continue;
     if (/^\[BẢNG/i.test(line)) continue;
-
-    // ── Bỏ qua prompt leakage ────────────────────────────────────────────
-    if (/QUY TẮC BẮT BUỘC|YÊU CẦU OUTPUT|THÔNG TIN BÀI|CHẾ ĐỘ:/i.test(line)) continue;
-    if (/^(BẮT BUỘC|NGHIÊM CẤM|FORBIDDEN|CẤM TUYỆT ĐỐI)/i.test(line)) continue;
-    if (/^(⚠️|❗|🎯|⛔|✅|🚫)/.test(line)) continue; // emoji prompt markers
-
-    // ── Bỏ qua URL / path fragment ──────────────────────────────────────
+ 
+    // ── Bỏ qua URL / URL fragment ────────────────────────────────────────
+    // VD: "us/library/ms187928.asp", "https://...", "http://..."
     if (/^https?:\/\//i.test(line)) continue;
     if (/^[\w./%-]+\.(asp|php|html?|aspx|jsp)\b/i.test(line)) continue;
-    if (/^[\w-]+\/[\w-]+\//.test(line)) continue;
-
-    // ── Bỏ qua code fragment bị cắt ─────────────────────────────────────
+    if (/^[\w-]+\/[\w-]+\//.test(line)) continue;           // path fragment: "us/library/..."
+ 
+    // ── Bỏ qua code fragment bị cắt giữa chừng ─────────────────────────
+    // Dấu hiệu: bắt đầu bằng dấu phẩy, dấu cộng, dấu chấm phẩy, /
     if (/^[,+;/\\()\[\]{}|]/.test(line)) continue;
+ 
+    // Kết thúc bằng dấu cộng, dấu phẩy (dòng bị cắt giữa chừng)
     if (/[+,]$/.test(line)) continue;
-
-    // ── Bỏ qua dòng quá ngắn / OCR noise ────────────────────────────────
+ 
+    // ── Bỏ qua dòng quá ngắn ────────────────────────────────────────────
     if (line.length < 20) continue;
+ 
+    // ── Bỏ qua dòng chứa ký hiệu template/placeholder ──────────────────
+    if (/^\[\^/.test(line)) continue;
+    if (/^@</.test(line)) continue;
+    if (/^\[,\s*@/.test(line)) continue;
+ 
+    // ── Bỏ qua dòng toàn số / ký hiệu ──────────────────────────────────
     if (/^[\d\s\-./]+$/.test(line)) continue;
+ 
+    // ── Bỏ qua OCR noise: chuỗi không có ký tự chữ đủ dài ──────────────
     const letterCount = (line.match(/[a-zA-ZÀ-ỹ]/g) || []).length;
     if (letterCount < 6) continue;
-
-    // ── Bỏ qua bullet bị cắt giữa câu ──────────────────────────────────
+ 
+    // ── Bỏ qua dòng bullet bị cắt (◦/• + nội dung < 80 ký tự không có dấu câu) ──
     if (/^[◦•]\s+/.test(line)) {
       const content = line.replace(/^[◦•]\s+/, "").trim();
       if (!/[.!?;:…]$/.test(content) && content.length < 80) continue;
     }
-
-    // ────────────────────────────────────────────────────────────────────
-    // DETECT NỘI DUNG CÓ GIÁ TRỊ — ĐA CHỦ ĐỀ
-    // ────────────────────────────────────────────────────────────────────
-
-    // 1. Toán học / công thức (domain: math, physics, finance, ...)
-    const hasMeaningfulMath =
-      /[=+\-*/^√∑∏≤≥≈%]/.test(line) &&
-      /[a-zA-ZÀ-ỹ]{3,}/.test(line);
-
-    // 2. Định nghĩa / khái niệm (domain-agnostic)
-    const hasDef =
-      /(định nghĩa|khái niệm|công thức|nguyên lý|nguyên tắc|quy tắc|quy luật|định lý|hệ quả|tính chất|đặc điểm|phân loại|theorem|lemma|property|axiom|rule|principle|formula|definition)/i.test(line);
-
-    // 3. Liệt kê có cấu trúc: "X bao gồm:", "X gồm:", "X là:", "Có N loại:"
-    const hasEnumeration =
-      /(bao gồm|gồm có|gồm:|bao gồm:|có \d+ loại|có \d+ bước|có \d+ trường hợp|phân thành|chia thành)/i.test(line);
-
-    // 4. Kỹ thuật / quy trình (domain: IT, engineering, medicine, ...)
-    const hasProcess =
-      /(bước \d+|step \d+|giai đoạn|quy trình|thủ tục|cách thức|phương pháp|algorithm|workflow)/i.test(line);
-
-    // 5. Lưu ý / cảnh báo quan trọng (học thuật)
-    const hasNote =
-      /^(lưu ý|chú ý|quan trọng|note:|warning:|important:|nhớ rằng|cần nhớ)/i.test(line);
-
-    // 6. Bullet có nội dung đầy đủ (dòng bắt đầu bằng - hoặc số, đủ dài)
-    const isCompleteBullet =
-      /^[-*•]\s+.{40,}/.test(line) || /^\d+[.)]\s+.{30,}/.test(line);
-
-    const tooNoisy = line.length > 280;
-    const isPromptLike =
-      /KHÔNG ĐƯỢC|BẮT BUỘC|PHẢI|TUYỆT ĐỐI|CHỈ DÙNG|forbidden|mandatory/i.test(line);
-
-    if (
-      !tooNoisy &&
-      !isPromptLike &&
-      (hasMeaningfulMath || hasDef || hasEnumeration || hasProcess || hasNote || isCompleteBullet)
-    ) {
-      results.push(line.length > 200 ? line.slice(0, 200) + "..." : line);
+ 
+    // ── Check nội dung có giá trị học thuật ─────────────────────────────
+    const hasMath = /[=+\-*/^√∑∏≤≥≈%]/.test(line);
+    const hasDef  = /(định nghĩa|công thức|theorem|lemma|hệ quả|quy tắc|rule|property|axiom)/i.test(line);
+ 
+    // hasMath phải đi kèm chữ thực sự (tránh "-" hay "=" đơn thuần)
+    const hasMeaningfulMath = hasMath && /[a-zA-ZÀ-ỹ]{3,}/.test(line);
+ 
+    const tooNoisy = line.length > 250;
+ 
+    if ((hasMeaningfulMath || hasDef) && !tooNoisy) {
+      results.push(line.length > 180 ? line.slice(0, 180) + "..." : line);
     }
   }
-
+ 
   return [...new Set(results)].slice(0, 8);
 };
 
 // ─────────────────────────────────────────────
-// IMPORT NOTES SCOPE FILTER — domain-agnostic
-// Lọc ghi chú theo phạm vi ngày học hiện tại.
-//
-// Strategy:
-//   1. Nếu coveredSections rỗng → giữ nguyên
-//   2. Nếu tài liệu có số mục X.Y → lọc theo số mục
-//   3. Nếu không có số mục (tài liệu tự nhiên) → lọc bằng keyword match
-//      từ tiêu đề section trong coveredSections
+// ✅ FIX #2: EXTRACT CODE IDENTIFIERS FROM CONTEXT
+// Trích xuất tên SP, bảng, biến SQL từ context RAG
+// để prompt có thể nhắc AI dùng đúng tên từ tài liệu
 // ─────────────────────────────────────────────
-const filterNotesByScope = (notes, coveredSections = []) => {
-  if (!Array.isArray(notes) || notes.length === 0) return notes;
-  if (!Array.isArray(coveredSections) || coveredSections.length === 0) return notes;
-
-  // ── Case A: tài liệu có số mục X.Y ──
-  const allowedNums = new Set(
-    coveredSections
-      .map(s => (String(s).match(/^(\d+\.\d+)/) || [])[1])
-      .filter(Boolean)
-  );
-
-  if (allowedNums.size > 0) {
-    return notes.filter(note => {
-      const s = String(note || "");
-      const numsInNote = (s.match(/\b(\d+\.\d+)\b/g) || []);
-      if (numsInNote.length === 0) return true; // ghi chú tổng quát → giữ
-      const hasOutOfScope = numsInNote.some(n => !allowedNums.has(n));
-      return !hasOutOfScope;
-    });
-  }
-
-  // ── Case B: tài liệu không đánh số → lọc bằng keyword ──
-  // Trích từ khóa ngắn (2-4 từ đầu) từ mỗi coveredSection
-  const allowedKeywords = coveredSections
-    .map(s => normalizeText(String(s)).slice(0, 40))
-    .filter(k => k.length >= 4);
-
-  if (!allowedKeywords.length) return notes;
-
-  return notes.filter(note => {
-    const noteNorm = normalizeText(String(note || ""));
-    // Giữ lại nếu note khớp bất kỳ keyword nào từ danh sách sections hôm nay
-    return allowedKeywords.some(k => noteNorm.includes(k.slice(0, 20)));
-  });
-};
-
-// ─────────────────────────────────────────────
-// EXTRACT CONTEXT TERMS — domain-agnostic
-// Trích thuật ngữ, tên riêng, ký hiệu từ tài liệu (mọi lĩnh vực)
-// ─────────────────────────────────────────────
-const CONTEXT_TERM_STOPWORDS = new Set([
-  "the", "and", "for", "with", "from", "this", "that", "các", "của", "cho",
-  "với", "trong", "khi", "này", "được", "theo", "như", "một", "những",
-  "bài", "phần", "chương", "mục", "ngày", "ví", "dụ",
-]);
-
-const extractContextTerms = (text) => {
+const extractCodeIdentifiers = (text) => {
+  // ✅ Decode HTML entities trước (PDF parser có thể inject &lt; &gt; &amp;)
   let src = String(text || "")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -877,44 +548,41 @@ const extractContextTerms = (text) => {
     .replace(/&#\d+;/g, "");
 
   const found = new Set();
-  const add = (term) => {
-    const t = String(term || "").trim();
-    if (t.length < 2 || t.length > 50) return;
-    if (CONTEXT_TERM_STOPWORDS.has(t.toLowerCase())) return;
-    found.add(t);
-  };
 
-  // Thuật ngữ trong ngoặc kép / nháy
-  const quoted = src.match(/"([^"]{2,45})"|'([^']{2,45})'|«([^»]{2,45})»/g) || [];
-  quoted.forEach((q) => add(q.replace(/^["'«]|["'»]$/g, "")));
+  // Stored Procedures / Functions: sp*, fn*, usp*
+  const spMatches = src.match(/\b(sp[A-Z][A-Za-z0-9_]+|usp[A-Z][A-Za-z0-9_]+|fn[A-Z][A-Za-z0-9_]+)/g) || [];
+  spMatches.forEach(m => found.add(m));
 
-  // Nhãn đánh số: "1.2 Tên khái niệm"
-  const numbered = src.match(/\b\d+(?:\.\d+)+\s+[A-ZÀ-Ỹa-zà-ỹ][^\n.]{2,40}/g) || [];
-  numbered.forEach((l) => add(l.replace(/^\d+(?:\.\d+)+\s+/, "").trim()));
+  // CREATE PROC / CREATE PROCEDURE / CREATE FUNCTION tên
+  const createMatches = src.match(/CREATE\s+(?:PROC|PROCEDURE|FUNCTION)\s+(\w+)/gi) || [];
+  createMatches.forEach(m => {
+    const name = m.split(/\s+/).pop();
+    if (name && name.length > 2) found.add(name);
+  });
 
-  // Cụm tên riêng / thuật ngữ (PascalCase, snake_case, có dấu tiếng Việt)
-  const terms = src.match(
-    /\b[A-ZÀ-Ỹ][A-Za-zÀ-ỹ0-9]*(?:[A-ZÀ-ỹ][A-Za-zÀ-ỹ0-9]*)+\b|\b[A-Za-zÀ-ỹ]{2,}(?:_[A-Za-zÀ-ỹ0-9]+)+\b|\b[A-ZÀ-Ỹ][A-ZÀ-Ỹ0-9]{1,}\b/g
-  ) || [];
-  terms.forEach(add);
+  // Tên bảng từ FROM / JOIN / INSERT / UPDATE
+  const tableMatches = src.match(/(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([A-Z][A-Za-z0-9_]+)/g) || [];
+  tableMatches.forEach(m => {
+    const name = m.split(/\s+/).pop();
+    if (name && name.length > 2 && !/^(SELECT|WHERE|SET|VALUES|BEGIN|END|TRAN)$/i.test(name)) {
+      found.add(name);
+    }
+  });
 
-  // Ký hiệu toán / khoa học phổ biến
-  const symbols = src.match(/\b[A-Z]{1,3}\d*(?:[₀-₉⁰-⁹]+)?\b|[α-ωΑ-Ω][₀-₉⁰-⁹]*/g) || [];
-  symbols.forEach(add);
+  // Tên biến SQL hệ thống (@@TRANCOUNT, @@IDENTITY, @@ROWCOUNT)
+  const sysVars = src.match(/@@[A-Z]+/gi) || [];
+  sysVars.forEach(m => found.add(m));
 
   return [...found].slice(0, 15);
 };
 
-// Alias giữ tương thích nội bộ
-const extractCodeIdentifiers = extractContextTerms;
-
 // ─────────────────────────────
-// EXTRACT KEY FACTS FROM CONTEXT — domain-agnostic
-// Trích xuất sự kiện/phân loại quan trọng từ bất kỳ loại tài liệu nào
-// để inject vào prompt, bắt buộc AI phải cover đầy đủ
+// ✅ FIX: EXTRACT KEY FACTS FROM CONTEXT
+// Trích xuất các sự kiện/phân loại quan trọng
+// để inject vào prompt bắt buộc AI phải cover đầy đủ
 // ─────────────────────────────
 const extractKeyFacts = (text) => {
-  // Decode HTML entities (chunks cũ trong DB có thể có &lt; &gt;)
+  // ✅ Decode HTML entities trước khi extract (chunks cũ trong DB có thể có &lt; &gt;)
   const src = String(text || "")
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
     .replace(/&#\d+;/g, '');
@@ -924,62 +592,77 @@ const extractKeyFacts = (text) => {
   const numberedLines = src.match(/^\s*\d+[.)\-]\s+.{10,}/gm) || [];
   numberedLines.forEach(l => facts.push(l.trim()));
 
-  // 2. Phân loại có số lượng (mọi chủ đề): loại, dạng, nhóm, kiểu, bước, giai đoạn...
-  const classificationLines = src.match(
-    /.{5,}(?:loại|trường hợp|nhóm|kiểu|dạng|cách|mức|bước|giai đoạn|thành phần|yếu tố|điều kiện|nguyên tắc|quy tắc)\s*[:]\.?.{5,}/gi
-  ) || [];
+  // 2. Phân loại có số lượng: "X loại:", "X trường hợp:", "X nhóm:"
+  const classificationLines = src.match(/.{5,}(?:loại|trường hợp|nhóm|kiểu|dạng|cách|mức|bước)\s*[:]\.?.{5,}/gi) || [];
   classificationLines.forEach(l => facts.push(l.trim().slice(0, 200)));
 
-  // 3. Định nghĩa rõ ràng (tiếng Việt và tiếng Anh)
-  const defLines = src.match(
-    /.{5,}(?:là một|là tập|là quá trình|được định nghĩa|được hiểu là|is defined as|refers to|is a type of|means that).{10,}/gi
-  ) || [];
+  // 3. Định nghĩa rõ ràng: "X là Y", "X được định nghĩa là"
+  const defLines = src.match(/.{5,}(?:là một|là tập|là quá trình|được định nghĩa).{10,}/gi) || [];
   defLines.forEach(l => facts.push(l.trim().slice(0, 200)));
 
-  // 4. Công thức / quan hệ định lượng (toán, khoa học, kinh tế...)
-  const formulaLines = src.match(
-    /^.{5,}[=≈≤≥→←∝∑∏∫].{5,}$/gm
-  ) || [];
-  formulaLines.slice(0, 4).forEach(l => facts.push(l.trim().slice(0, 200)));
-
-  // 5. Bullet points quan trọng (mọi ký hiệu bullet)
-  const bullets = src.match(/^\s*[◦•*\-▸►▷] {1,}[A-ZÀ-ỹ].{15,}/gm) || [];
-  bullets.slice(0, 8).forEach(l => facts.push(l.trim()));
-
-  // 6. Heading tiêu đề cấp 2, 3 — nội dung phải cover (trích từ context)
-  const headings = src.match(/^#{2,3}\s+.{5,}/gm) || [];
-  headings.slice(0, 6).forEach(l => facts.push(l.replace(/^#+\s*/, '').trim()));
+  // 4. Bullet points quan trọng: "◦ ...", "• ...", "- ..."
+  const bullets = src.match(/^\s*[◦•*\-] {1,}[A-ZÀ-ỹ].{15,}/gm) || [];
+  bullets.slice(0, 6).forEach(l => facts.push(l.trim()));
 
   // Loại bỏ trùng lặp và giới hạn
   return [...new Set(facts)]
-    .filter(f => f.length >= 10)
-    .slice(0, 15);
+    .filter(f => f.length >= 15)
+    .slice(0, 12);
 };
 
 // ─────────────────────────────────────────────────────────
-// POST-GENERATION: XÓA KHỐI VÍ DỤ CÓ PLACEHOLDER BỊA (domain-agnostic)
-// Áp dụng cho mọi khối ``` (mã, công thức, pseudo-code, bảng text...)
+// POST-GENERATION: XÓA CODE BLOCK BỊA
+// Quét từng code block trong bài học do AI sinh,
+// nếu chứa identifier không có trong CONTEXT → xóa block đó
 // ─────────────────────────────────────────────────────────
-const PLACEHOLDER_PATTERNS = [
-  /\bparam\d*\b/i,
-  /\bexample\b/i,
-  /\bten_?cua_?ban\b/i,
-  /\btenbang\b/i,
-  /\byour_?name\b/i,
-  /\bmy_?(function|table|procedure|class|variable)\b/i,
-  /\b<tên[^>]*>/i,
-  /\b\.\.\.\b/,
-  /_{3,}/,
-  /\bxxx+\b/i,
-  /\bplaceholder\b/i,
-  /\bgiá\s*trả\s*về\b/i,
-  /\btên\s*(của\s*)?(hàm|bảng|biến|class)\b/i,
-];
+const T_SQL_KEYWORDS = new Set([
+  'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'FROM', 'WHERE', 'JOIN', 'INNER', 'LEFT', 'RIGHT',
+  'ON', 'SET', 'VALUES', 'BEGIN', 'END', 'TRAN', 'TRANSACTION', 'COMMIT', 'ROLLBACK',
+  'CREATE', 'ALTER', 'DROP', 'PROC', 'PROCEDURE', 'FUNCTION', 'TABLE', 'IF', 'ELSE',
+  'DECLARE', 'EXEC', 'EXECUTE', 'RETURN', 'PRINT', 'CONVERT', 'CAST', 'NULL', 'NOT',
+  'AND', 'OR', 'AS', 'INTO', 'WITH', 'RECOMPILE', 'ENCRYPTION', 'OUTPUT', 'OUT',
+  'COUNT', 'SUM', 'MIN', 'MAX', 'AVG', 'IDENTITY', 'TRANCOUNT', 'ROWCOUNT', 'SAVE',
+  'LIKE', 'IN', 'EXISTS', 'DISTINCT', 'TOP', 'ORDER', 'BY', 'GROUP', 'HAVING',
+  'RAISERROR', 'TRY', 'CATCH', 'THROW', 'GO', 'USE', 'INT', 'VARCHAR', 'MONEY',
+  'DATETIME', 'SMALLDATETIME', 'BIT', 'FLOAT', 'NVARCHAR', 'DATE', 'PRIMARY', 'KEY',
+  'RETURNS', 'SCOPE_IDENTITY', 'GETDATE', 'PRINT', 'CONVERT', 'OBJECT_ID',
+  'INVOICES', 'VENDORS', 'INVOICELINEITEMS', 'INVOICECOPY', 'VENDORCOPY',
+]);
+
+// ✅ FIX: Whitelist keywords ngôn ngữ lập trình phổ biến — tránh false-positive với Python/R/Java/pseudocode
+const PROGRAMMING_KEYWORDS = new Set([
+  'DEF', 'CLASS', 'IMPORT', 'RETURN', 'SELF', 'NONE', 'TRUE', 'FALSE',
+  'ELIF', 'FOR', 'WHILE', 'WITH', 'LAMBDA', 'YIELD', 'RAISE', 'EXCEPT', 'FINALLY', 'PASS',
+  'BREAK', 'CONTINUE', 'GLOBAL', 'NONLOCAL', 'ASSERT', 'SUPER', 'INIT',
+  'APPEND', 'EXTEND', 'ITEMS', 'KEYS', 'ENUMERATE', 'ZIP', 'MAP', 'FILTER', 'LEN', 'RANGE',
+  'LIBRARY', 'REQUIRE', 'NA', 'NAN', 'FRAME', 'VECTOR',  // R
+  'PUBLIC', 'PRIVATE', 'PROTECTED', 'STATIC', 'VOID', 'NEW', 'THIS', 'EXTENDS',
+  'IMPLEMENTS', 'INTERFACE', 'ABSTRACT', 'FINAL', 'OVERRIDE', 'THROWS', 'STRING', 'BOOLEAN', 'DOUBLE',
+  'ALGORITHM', 'INPUT', 'OUTPUT', 'REPEAT', 'UNTIL', 'NODE', 'GRAPH', 'TREE',
+  'QUEUE', 'STACK', 'HEAP', 'SORT', 'SEARCH', 'THEN', 'DO', 'EACH', 'LET', 'VAR', 'CONST',
+  'STEP', 'MOD', 'DIV', 'ARRAY', 'PROCEDURE', 'BEGIN',
+]);
+
+// ✅ FIX: Chỉ apply CodeGuard với SQL context — tài liệu học thuật không có pattern này
+const isSqlContext = (contextText) =>
+  /\b(CREATE\s+(PROC|PROCEDURE|FUNCTION|TABLE)|DECLARE\s+@|@@[A-Z]+|BEGIN\s+TRAN|RAISERROR|EXEC\s+\w)/i.test(
+    contextText || ""
+  );
 
 const stripInvalidCodeBlocks = (content, contextText) => {
   if (!content || !contextText) return content;
 
-  const ctxNorm = normalizeText(contextText);
+  // ✅ FIX: Bỏ qua hoàn toàn với tài liệu không phải SQL.
+  // Chủ đề chính là học thuật/khoa học → không có pattern CREATE PROC / DECLARE @
+  if (!isSqlContext(contextText)) {
+    return content;
+  }
+
+  // Decode HTML entities trong context trước khi so sánh
+  const safeCtx = contextText
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+    .toLowerCase();
+
   const CODE_BLOCK_RE = /```[\w]*\n([\s\S]*?)```/g;
   let result = content;
   let match;
@@ -989,21 +672,50 @@ const stripInvalidCodeBlocks = (content, contextText) => {
     const blockFull = match[0];
     const blockCode = match[1];
 
-    const placeholderHits = PLACEHOLDER_PATTERNS.filter((re) => re.test(blockCode)).length;
-    // Ngưỡng 3: cần ít nhất 3 dấu hiệu placeholder mới xóa (trước là 2, dễ xóa oan ví dụ hợp lệ)
-    if (placeholderHits < 3) continue;
+    const identifiers = [];
 
-    // Giữ block nếu phần lớn nội dung đã có trong context (trích từ tài liệu)
-    const blockNorm = normalizeText(blockCode);
-    const overlapWords = blockNorm.split(/\s+/).filter((w) => w.length > 4 && ctxNorm.includes(w));
-    if (overlapWords.length >= 3) continue;
+    // @param names
+    (blockCode.match(/@[A-Za-z][A-Za-z0-9_]*/g) || []).forEach(v => identifiers.push(v));
 
-    console.warn(`[ExampleGuard] Xóa khối ví dụ có placeholder bịa (${placeholderHits} dấu hiệu)`);
-    toRemove.push({ full: blockFull });
+    // SP names: sp*, usp*, fn*
+    (blockCode.match(/\b(sp[A-Z][A-Za-z0-9_]+|usp[A-Z][A-Za-z0-9_]+|fn[A-Z][A-Za-z0-9_]+)/g) || [])
+      .forEach(v => identifiers.push(v));
+
+    // Tên bảng / hàm sau keyword
+    (blockCode.match(/(?:from|join|into|update|table|procedure|proc|function)\s+([A-Za-z#][A-Za-z0-9_]*)/gi) || [])
+      .forEach(m => identifiers.push(m.trim().split(/\s+/).pop()));
+
+    // ✅ FIX: Lọc bỏ T-SQL keywords và programming keywords phổ biến (Python/R/Java/pseudocode)
+    const nonKeywordIds = identifiers.filter(id =>
+      !T_SQL_KEYWORDS.has(id.replace(/^@/, '').toUpperCase()) &&
+      !PROGRAMMING_KEYWORDS.has(id.replace(/^@/, '').toUpperCase()) &&
+      id.length > 2
+    );
+
+    if (nonKeywordIds.length === 0) continue; // chỉ có keywords → giữ lại
+
+    // Kiểm tra từng identifier có trong context không
+    const fakeIds = nonKeywordIds.filter(id => {
+      const clean = id.replace(/^@/, '').toLowerCase();
+      if (safeCtx.includes(clean)) return false;           // có trong context → ok
+      if (id.startsWith('@') && clean.length <= 3) return false; // @p1, @n... → bỏ qua
+      return true;
+    });
+
+    // ✅ FIX: Tăng threshold lên 3 (từ 2) — giảm false-positive với SQL phức tạp
+    // và tài liệu dùng hỗn hợp nhiều ngôn ngữ lập trình
+    if (fakeIds.length >= 3) {
+      console.warn(`[CodeGuard] Xóa code block chứa identifier bịa: ${fakeIds.join(', ')}`);
+      toRemove.push({ full: blockFull, fakes: fakeIds });
+    } else if (fakeIds.length >= 1) {
+      console.log(`[CodeGuard] Bỏ qua cảnh báo: "${fakeIds.join(', ')}" không thấy trong chunk hiện tại (có thể ở chunk khác)`);
+    }
   }
 
-  for (const { full } of toRemove) {
-    result = result.replace(full, "> ⚠️ *Ví dụ bị lược bỏ vì chứa nội dung giả lập không có trong tài liệu.*");
+  // Thay code block bịa bằng ghi chú cảnh báo
+  for (const { full, fakes } of toRemove) {
+    const note = `> ⚠️ *Ví dụ code bị lược bỏ vì chứa tên không có trong tài liệu: \`${fakes.join('`, `')}\`*`;
+    result = result.replace(full, note);
   }
 
   return result;
@@ -1040,9 +752,7 @@ const getObjectiveSeedsFromText = (text, days) => {
 // ─────────────────────────────
 // DOCUMENT OUTLINE (IMPROVED)
 // ─────────────────────────────
-// ─────────────────────────────
-// DOCUMENT OUTLINE (IMPROVED)
-// ─────────────────────────────
+
 const extractDocumentOutline = (text) => {
   const lines = String(text || "")
     .split(/\r?\n/)
@@ -1051,97 +761,44 @@ const extractDocumentOutline = (text) => {
 
   const headings = [];
 
-  const cleanHeadingOcr = (h) => fixOcrGluedWords(h || "").trim();
-
-  const trimHeadingToPhrase = (raw, hasNumber = false) => {
-    if (hasNumber) return raw.slice(0, 100);
-
-    if (!raw || raw.length <= 40) return raw;
-
-    const parenIdx = raw.indexOf('(', 35);
-    if (parenIdx > 35 && parenIdx < raw.length - 1) {
-      return raw.slice(0, parenIdx).trim();
-    }
-
-    const words = raw.split(/\s+/);
-    let shortRun = 0;
-    let cutPos = -1;
-    let charCount = 0;
-    for (let i = 0; i < words.length; i++) {
-      charCount += words[i].length + 1;
-      if (charCount > 40) {
-        if (words[i].length <= 5) {
-          shortRun++;
-          if (shortRun >= 3) {
-            cutPos = i - shortRun + 1;
-            break;
-          }
-        } else {
-          shortRun = 0;
-        }
-      }
-    }
-    if (cutPos > 2) return words.slice(0, cutPos).join(' ').trim();
-
-    return raw.slice(0, 80).trim();
-  };
-
   for (const line of lines) {
     // Markdown heading
     const md = line.match(/^(#{1,3})\s+(.+)/);
     if (md) {
-      const raw = md[2].replace(/[*_`]/g, "");
-      const hasNum = /\d+\.\d+/.test(raw);
-      const cleaned = cleanHeadingOcr(raw);
-
-      if (md[1] === '#' && !hasNum) continue;
-
-      headings.push(trimHeadingToPhrase(cleaned, hasNum).slice(0, 100));
+      headings.push(md[2].replace(/[*_`]/g, "").slice(0, 100));
       continue;
     }
 
     // Numbered sections
-    // Numbered sections
-    const stripped = line.replace(/^[*_]{1,3}/, "").replace(/[*_]{1,3}$/, "").trim();
-    const num = stripped.match(/^(\d+(?:\.\d+)*)\s+(.{3,80})/);
+    const num = line.match(/^(\d+(\.\d+)*)\s+(.{3,80})/);
     if (num) {
-      const sectionNum = num[1];
-      const titleRaw = cleanHeadingOcr(num[2].replace(/[*_`]/g, ""));
-
-      const hasSubSection = sectionNum.includes('.');
-      if (!hasSubSection) continue;
-
-      const fullHeading = `${sectionNum} ${trimHeadingToPhrase(titleRaw, true)}`;
-      headings.push(fullHeading.slice(0, 100));
+      headings.push(`${num[1]} ${num[3]}`.slice(0, 100));
       continue;
     }
 
-    // Chapter keywords — chỉ lấy nếu có số mục X.Y đi kèm
-    // FIX 3: Bỏ qua "Chương IV ...", "Chapter 1 ...", "Phần A ..." không có X.Y
-    // Tránh tiêu đề tổng quát lọt vào outline rồi trở thành title ngày 1
-    if (/^(chương|chapter|phần|section|bài|unit|module)\s+/i.test(line)) {
-      const hasNum = /\d+\.\d+/.test(line);
-      if (!hasNum) continue; // bỏ qua heading cấp chương không có số mục con
-      headings.push(trimHeadingToPhrase(cleanHeadingOcr(line), true).slice(0, 100));
+    // Chapter keywords
+    if (/^(chương|chapter|phần|section)\s+/i.test(line)) {
+      headings.push(line.slice(0, 100));
     }
   }
-
+  // ── CLEAN OCR NOISE ──────────────────────────────────────────
   const cleanHeadings = [...new Set(headings)].filter((h) => {
-    if (/(?:^|\s)\w\s+\w\s+\w\s+\w/.test(h)) return false;
-    if (/^\d+[/\\]\d+$/.test(h.trim())) return false;
-    if (/^[\d\s,.]+$/.test(h.trim())) return false;
-    if (!/[A-Za-zÀ-ỹ]{2,}/.test(h)) return false;
+    // Loại bỏ heading có khoảng trắng bất thường giữa chữ: "Gi ới", "Ki ể u"
+    if (/\b\w{1,2}\s+\w{1,2}\s+\w/.test(h)) return false;
 
-    // FIX 4: Loại bỏ heading là tên chương/tài liệu tổng quát không có số mục X.Y
-    // Domain-agnostic: áp dụng cho Luật, Y học, Kinh tế, Lịch sử, Lập trình...
-    const hasSubSectionNum = /\d+\.\d+/.test(h);
-    const isChapterLevel = /^(chương|chapter|phần|section|bài|unit|module)\s+/i.test(h);
-    if (isChapterLevel && !hasSubSectionNum) return false;
+    // Loại bỏ heading chứa nội dung bảng/kết quả lẫn vào
+    if (/Thao tác|Kết quả|Ki ể u|int\)|50\/100/.test(h)) return false;
+
+    // Loại bỏ heading quá dài (> 80 ký tự sau khi đã slice — thường là content)
+    if (h.replace(/^\d+(\.\d+)*\s+/, "").length > 75) return false;
+
+    // Loại bỏ heading có dấu ngoặc đơn lẻ hoặc ký tự code
+    if (/[()]{2,}|\)+$/.test(h)) return false;
 
     return true;
   });
 
-  return cleanHeadings.slice(0, 60);
+  return [...new Set(headings)].slice(0, 40);
 };
 
 // ─────────────────────────────────────────────
@@ -1215,38 +872,6 @@ const validateScopeCompliance = (content, item, previousSummaries = []) => {
     }
   }
 
-  // ── CHECK 3: phát hiện số section lạc chỗ ──
-  // FIX: Chỉ bắt số mục ở đầu dòng heading Markdown (## 2.3 Tiêu đề)
-  // Tránh bắt sub-number như "7.1" từ bên trong "1.7.1 Định nghĩa"
-  const allowedNums = new Set(
-    coveredSections
-      .map(s => (s.match(/^(\d+\.\d+)/) || [])[1])
-      .filter(Boolean)
-  );
-
-  if (allowedNums.size > 0) {
-    // Chỉ match số mục xuất hiện ở đầu dòng heading: "## 2.3 Tiêu đề" hoặc "### 2.3 Tiêu đề"
-    // KHÔNG match "1.7.1" hay số mục nằm giữa câu văn
-    const foundNums = [
-      ...content.matchAll(/^#{1,4}\s+(\d+\.\d+)(?!\.\d)\b/gm)
-    ].map(m => m[1]);
-
-    const outOfScope = [...new Set(foundNums)].filter(n => {
-      // Bỏ qua nếu n là con trực tiếp của một allowed num (1.7 → cho phép 1.7.x)
-      if (allowedNums.has(n)) return false;
-      for (const a of allowedNums) {
-        if (n.startsWith(`${a}.`)) return false;
-      }
-      return true;
-    });
-
-    if (outOfScope.length > 0) {
-      violations.push(
-        `⚠️ Nội dung có mục ngoài phạm vi: ${outOfScope.join(", ")} (chỉ được phép: ${[...allowedNums].join(", ")})`
-      );
-    }
-  }
-
   return {
     ok: violations.length === 0,
     violations,
@@ -1286,16 +911,10 @@ const checkContentDuplication = (newContent, previousSummaries = []) => {
   const results = [];
 
   for (const prev of previousSummaries) {
-    // Cải tiến: so sánh với cả snippet nội dung thực tế (không chỉ title+summary)
-    const refParts = [
-      prev.title || "",
-      prev.summary || "",
-      prev.contentSnippet || ""  // snippet 300 từ đầu bài cũ
-    ];
-    const ref = refParts.join(" ");
+    const ref = `${prev.title} ${prev.summary || ""}`;
 
     const ratio = computeContentOverlap(
-      newContent.substring(0, 1500),  // tăng từ 1000 lên 1500 để bắt được nhiều hơn
+      newContent.substring(0, 1000),
       ref
     );
 
@@ -1315,447 +934,7 @@ const checkContentDuplication = (newContent, previousSummaries = []) => {
 };
 
 // ─────────────────────────────────────────────
-// FIX CODE BLOCK INTEGRITY (MỚI)
-// Nếu content có số lần ``` lẻ → code block chưa đóng → xóa block dở dạng cuối cùng
-// ─────────────────────────────────────────────
-const fixUnclosedCodeBlocks = (content) => {
-  if (!content) return content;
-  const fenceMatches = content.match(/^```/gm) || [];
-  if (fenceMatches.length % 2 === 0) return content; // Đã chẵn, không cần sửa
-
-  // Tìm vị trí ``` mở cuối cùng không có cặp đóng
-  const lastOpenIdx = content.lastIndexOf("\n```");
-  if (lastOpenIdx === -1) return content;
-
-  // Cắt bỏ từ ``` mở dở dạng đó trở đi
-  const fixed = content.substring(0, lastOpenIdx).trim();
-  console.warn("[FenceGuard] Đã xóa code block không đóng, cắt tại:", lastOpenIdx);
-  return fixed;
-};
-
-// ─────────────────────────────────────────────
-// SECTION NUMBER HELPERS
-// ─────────────────────────────────────────────
-const getSectionNumFromLine = (line) => {
-  const t = String(line || "").trim()
-    .replace(/^\*+|\*+$/g, "")
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^bổ\s*sung:\s*/i, "");
-  const m = t.match(/(?:^|\s)(\d+(?:\.\d+)+)\s+/);
-  return m ? m[1] : null;
-};
-
-const isSectionHeadingLine = (line) => {
-  const t = String(line || "").trim();
-  if (/^#{1,4}\s+\d+(?:\.\d+)+\s/.test(t)) return true;
-  if (/^\*{1,2}\d+(?:\.\d+)+\s/.test(t)) return true;
-  if (/^\d+(?:\.\d+)+\s+[A-ZÀ-Ỹa-zà-ỹ]/.test(t)) return true;
-  const tNorm = t.normalize("NFC");
-  if (/^#{1,4}\s+bổ\s*sung(\s*:|$)/i.test(tNorm)) return true;
-  return false;
-};
-
-const getAllowedSectionNums = (coveredSections = []) =>
-  new Set(
-    coveredSections
-      .map((s) => (String(s).match(/(\d+(?:\.\d+)+)/) || [])[1])
-      .filter(Boolean)
-  );
-
-const getAllowedMajorChapters = (allowedNums) =>
-  new Set([...allowedNums].map((n) => n.split(".")[0]).filter(Boolean));
-
-const isSectionNumAllowed = (num, allowedNums) => {
-  if (!num || !allowedNums?.size) return true;
-  if (allowedNums.has(num)) return true;
-  for (const a of allowedNums) {
-    if (num.startsWith(`${a}.`)) return true;
-  }
-  const major = num.split(".")[0];
-  const allowedMajors = getAllowedMajorChapters(allowedNums);
-  return allowedMajors.has(major);
-};
-
-const filterChunksByCoveredSections = (chunks, coveredSections = []) => {
-  if (!Array.isArray(chunks) || !coveredSections.length) return chunks;
-
-  const allowedNums = getAllowedSectionNums(coveredSections);
-
-  // Tài liệu có cấu trúc số mục X.Y
-  if (allowedNums.size) {
-    // FIX: xác định xem tất cả allowed nums có thuộc cùng 1 chapter không
-    // Nếu có → cho phép toàn bộ chunk cùng chapter đó
-    // Lý do: outline có thể bị gap (bold heading bị bỏ sót bởi docling/OCR)
-    // → chunk nền tảng (1.1) bị drop oan dù ngày học chỉ có (1.2, 1.3)
-    const allowedMajors = new Set([...allowedNums].map(n => n.split(".")[0]));
-    const singleChapter = allowedMajors.size === 1 ? [...allowedMajors][0] : null;
-
-    const filtered = chunks.filter((chunk) => {
-      const sec = String(chunk.section || "");
-      // FIX: strip bold/italic trong section name trước khi extract số mục
-      const secClean = sec.replace(/[*_`]/g, "").trim();
-      const secNum = (secClean.match(/(\d+(?:\.\d+)+)/) || [])[1]
-        || (String(chunk.content || "").match(/^(\d+(?:\.\d+)+)\s/m) || [])[1];
-
-      // Chunk không có số mục → bỏ qua (thường là noise)
-      if (!secNum) return false;
-
-      // FIX: nếu tất cả coveredSections thuộc cùng 1 chapter
-      // → giữ lại mọi chunk cùng chapter, kể cả số mục không khớp chính xác
-      // Tránh bỏ sót chunk nền tảng do gap trong outline
-      if (singleChapter && secNum.startsWith(`${singleChapter}.`)) return true;
-
-      return isSectionNumAllowed(secNum, allowedNums);
-    });
-
-    if (filtered.length > 0) return filtered;
-    console.warn("[ScopeFilter] No chunks matched section nums", [...allowedNums], "— returning empty");
-    return [];
-  }
-
-  // Tài liệu không đánh số: lọc theo cụm từ tiêu đề section
-  const keys = coveredSections
-    .map((s) => normalizeVN(String(s)).slice(0, 30))
-    .filter((k) => k.length > 4);
-
-  if (!keys.length) return chunks;
-
-  const filtered = chunks.filter((chunk) => {
-    const blob = normalizeVN(`${chunk.section || ""} ${String(chunk.content || "").slice(0, 400)}`);
-    return keys.some((k) => blob.includes(k.slice(0, Math.min(20, k.length))));
-  });
-
-  if (filtered.length >= 1) return filtered;
-  console.warn("[ScopeFilter] No keyword match for sections", keys.slice(0, 3), "— returning empty");
-  return [];
-};
-
-// ─────────────────────────────────────────────
-// POST-GENERATION SCOPE STRIPPER
-// Loại bỏ nội dung AI viết thuộc section không nằm trong coveredSections
-// Domain-agnostic: chỉ strip khi tài liệu có đánh số X.Y
-// ─────────────────────────────────────────────
-
-/**
- * Sự khác biệt với isSectionNumAllowed:
- * strict hơn — chỉ cho phép đúcng số mục trong coveredSections và con của chúng.
- * Không cho phép toàn bộ major chapter (ví dụ: 1.x không cho phép 1.4 nếu chỉ được phép 1.1, 1.2).
- */
-// Cần thêm check: nếu số mục là sub-number của allowed → giữ lại
-const isSectionNumAllowedStrict = (num, allowedNums) => {
-  if (!num || !allowedNums?.size) return true;
-  if (allowedNums.has(num)) return true;
-  // Cho phép con trực tiếp: 1.7 → 1.7.1, 1.7.2
-  for (const a of allowedNums) {
-    if (num.startsWith(`${a}.`)) return true;
-  }
-  // FIX MỚI: nếu num là phần cuối của một allowed num
-  // VD: "7.1" xuất hiện trong context của "1.7" → không phải heading thật
-  // → chỉ strip nếu num xuất hiện ở đầu dòng heading thực sự
-  return false;
-};
-/**
- * Strip nội dung AI sinh ra thuộc section ngoài phạm vi của ngày học.
- *
- * Hoạt động:
- *  - Phát hiện tiêu đề có số mục trong output AI ("### 2.3 Giao dịch", "2.3 Title")
- *  - Nếu số mục đó không nằm trong coveredSections → xóa tiêu đề + nội dung
- *  - Chỉ strip khi coveredSections có số mục (X.Y) — không ảnh hưởng tài liệu phi số
- */
-const stripOutOfScopeHeadings = (content, coveredSections = []) => {
-  if (!content || !coveredSections.length) return content;
-
-  const allowedNums = getAllowedSectionNums(coveredSections);
-  if (!allowedNums.size) return content;
-
-  // FIX: nếu tất cả allowed nums thuộc cùng 1 chapter → không strip heading cùng chapter
-  // Nhất quán với filterChunksByCoveredSections: tránh xóa oan heading nền tảng
-  const allowedMajors = new Set([...allowedNums].map(n => n.split(".")[0]));
-  const singleChapter = allowedMajors.size === 1 ? [...allowedMajors][0] : null;
-
-  const lines = content.split("\n");
-  const result = [];
-  let inBadSection = false;
-
-  for (const line of lines) {
-    const t = line.trim();
-
-    const mdHeadingMatch = t.match(/^(#{1,4})\s+(\d+(?:\.\d+)+)\b/);
-    const plainNumMatch = !mdHeadingMatch && t.match(/^(\d+(?:\.\d+)+)\s+[A-Z\u00C0-\u1EF9a-z\u00E0-\u1EF9]/);
-
-    const secNum = mdHeadingMatch ? mdHeadingMatch[2]
-      : plainNumMatch ? plainNumMatch[1]
-        : null;
-
-    if (secNum) {
-      const isSubSection = (secNum.match(/\./g) || []).length >= 2;
-
-      let isAllowed;
-      if (isSubSection) {
-        const parentNum = secNum.split(".").slice(0, 2).join(".");
-        isAllowed = allowedNums.has(parentNum) || isSectionNumAllowedStrict(secNum, allowedNums);
-      } else {
-        isAllowed = isSectionNumAllowedStrict(secNum, allowedNums);
-      }
-
-      // FIX: cùng chapter với coveredSections → không bao giờ strip
-      // Lý do: AI viết "### 1.1 ..." khi context có chunk 1.1 (do singleChapter logic)
-      // Nếu strip thì bài bị mất nội dung nền tảng dù context đúng
-      if (!isAllowed && singleChapter && secNum.startsWith(`${singleChapter}.`)) {
-        isAllowed = true;
-      }
-
-      if (!isAllowed) {
-        inBadSection = true;
-        console.warn(`[ScopeStrip] Removed out-of-scope section ${secNum} (allowed: ${[...allowedNums].join(",")})`);
-        continue;
-      } else {
-        inBadSection = false;
-      }
-    } else if (inBadSection) {
-      if (/^#{1,4}\s+[A-Z\u00C0-\u1EF9a-z\u00E0-\u1EF9]/.test(t) && !t.match(/^#{1,4}\s+\d/)) {
-        inBadSection = false;
-      } else {
-        continue;
-      }
-    }
-
-    result.push(line);
-  }
-
-  const stripped = result.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  const removedLines = lines.length - result.length;
-  if (removedLines > 0) {
-    console.log(`[ScopeStrip] Removed ${removedLines} out-of-scope lines from lesson`);
-  }
-  return stripped;
-};
-
-const stripSupplementSections = (content) => {
-  if (!content) return content;
-  const lines = content.split("\n");
-  const output = [];
-  let skip = false;
-
-  for (const line of lines) {
-    const t = line.trim();
-    // FIX: normalize trước khi test để tránh fixOcrGluedWords làm hỏng dấu
-    const tNorm = t.normalize("NFC");
-    if (/^#{1,4}\s+bổ\s*sung(\s*:|$)/i.test(tNorm) || /^#{1,4}\s+supplement/i.test(tNorm)) {
-      skip = true;
-      continue;
-    }
-    if (skip && isSectionHeadingLine(line) && !/^#{1,4}\s+bổ\s*sung(\s*:|$)/i.test(tNorm)) {
-      skip = false;
-    }
-    if (!skip) output.push(line);
-  }
-
-  return output.join("\n");
-};
-
-const stripLessonMetadata = (content) => {
-  if (!content) return content;
-
-  const META_RE = /^\*{0,2}(Ngày|Bloom|Chủ đề|Mục\s*[Tt]iêu|Nội\s*[Dd]ung|Bài\s*giảng)\s*:\*{0,2}\s*.+$/i;
-
-  // FIX: bắt thêm heading "### Mục tiêu", "## Objective", "## Overview"
-  // và toàn bộ bullet/text ngay bên dưới (cho đến khi gặp heading khác hoặc dòng trống kép)
-  const META_HEADING_RE = /^#{1,4}\s*(Mục\s*tiêu|Objective|Overview)\s*$/i;
-
-  const lines = content.split("\n");
-  const output = [];
-  let skipMetaBlock = false;
-
-  for (const line of lines) {
-    const t = line.trim();
-
-    // Phát hiện heading meta → bắt đầu skip block
-    if (META_HEADING_RE.test(t)) {
-      skipMetaBlock = true;
-      continue;
-    }
-
-    // Kết thúc skip block khi gặp:
-    // - Heading thật (## / ###) không phải meta
-    // - Hoặc dòng trống sau ít nhất 1 dòng content bị skip
-    if (skipMetaBlock) {
-      const isNewHeading = /^#{1,4}\s+\S/.test(t);
-      if (isNewHeading) {
-        skipMetaBlock = false;
-        // Không continue — heading mới này được giữ lại
-      } else {
-        continue; // bỏ bullet/text thuộc block meta
-      }
-    }
-
-    // Lọc dòng meta dạng "Mục tiêu: ..." inline (regex cũ)
-    if (META_RE.test(t)) continue;
-
-    output.push(line);
-  }
-
-  return output.join("\n");
-};
-const stripOutOfScopeSections = (content, coveredSections = []) => {
-  if (!content || !coveredSections.length) return content;
-
-  const allowedNums = getAllowedSectionNums(coveredSections);
-  // Không có số mục X.Y → chỉ dựa prompt + lọc chunk, không cắt heading theo keyword
-  if (!allowedNums.size) return content;
-
-  const lines = content.split("\n");
-  const output = [];
-  let skip = false;
-  let removed = 0;
-
-  for (const line of lines) {
-    const t = line.trim();           // ← PHẢI có dòng này
-    const tNorm = t.normalize("NFC"); // ← t được dùng ở đây
-
-    if (/^#{1,4}\s+bổ\s*sung(\s*:|$)/i.test(tNorm)) {
-      skip = true;
-      removed++;
-      continue;
-    }
-
-    const sectionNum = getSectionNumFromLine(line);
-
-    if (sectionNum && (isSectionHeadingLine(line) || /^#{1,4}\s+/.test(t))) {
-      if (!isSectionNumAllowed(sectionNum, allowedNums)) {
-        skip = true;
-        removed++;
-        console.log(`[ScopeStrip] Loại mục ngoài phạm vi: ${sectionNum}`);
-        continue;
-      }
-      skip = false;
-    }
-
-    if (!skip) output.push(line);
-  }
-
-  if (removed > 0) {
-    console.log(`[ScopeStrip] Đã loại ${removed} section ngoài phạm vi`);
-  }
-
-  return output.join("\n").trim();
-};
-
-// ─────────────────────────────────────────────
-// DEDUP SECTIONS — xóa heading/mục X.Y lặp trong cùng 1 bài
-// ─────────────────────────────────────────────
-const GENERIC_HEADINGS_NO_DEDUP = new Set([
-  "ví dụ", "vi du", "example", "examples",
-  "tóm tắt", "tom tat", "tóm tắt ghi nhớ", "summary",
-  "ghi nhớ", "ghi nho", "note", "notes",
-  "bài tập", "bai tap", "exercise", "exercises",
-  "mở đầu", "mo dau", "introduction",
-  "kết luận", "ket luan", "conclusion",
-  "nhận xét", "nhan xet", "remark",
-  "thực hành", "thuc hanh", "practice",
-]);
-
-const isGenericHeading = (headingText) => {
-  const norm = String(headingText || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9\s]/g, "")
-    .trim();
-  return GENERIC_HEADINGS_NO_DEDUP.has(norm) || norm.length <= 10;
-};
-
-const removeDuplicateSections = (content) => {
-  if (!content || typeof content !== "string") return content;
-
-  const lines = content.split("\n");
-  const seenHeadings = new Set();
-  const seenSectionNums = new Set();
-  const outputLines = [];
-  let skipUntilNextHeading = false;
-  let removedCount = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    const sectionNum = getSectionNumFromLine(line);
-    const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)/)
-      || trimmed.match(/^\*{1,2}(\d+(?:\.\d+)+)\s+(.+)/);
-
-    if (headingMatch || sectionNum) {
-      const headingText = headingMatch
-        ? (headingMatch[2] || headingMatch[3] || "").trim().toLowerCase()
-        : "";
-
-      // ✅ FIX 3: KHÔNG dedup heading generic ngắn
-      if (isGenericHeading(headingText)) {
-        // Reset skip — generic heading luôn được giữ
-        skipUntilNextHeading = false;
-        outputLines.push(line);
-        continue;
-      }
-
-      const headingKey = headingMatch
-        ? `${headingMatch[1] || "**"}|${headingText}`
-        : `num|${sectionNum}`;
-
-      const isDupHeading = seenHeadings.has(headingKey);
-      const isDupSectionNum = sectionNum && seenSectionNums.has(sectionNum);
-
-      if (isDupHeading || isDupSectionNum) {
-        skipUntilNextHeading = true;
-        removedCount++;
-        console.log(`[DedupSection] Xóa section trùng có số mục: "${headingText || sectionNum}"`);
-        continue;
-      }
-
-      seenHeadings.add(headingKey);
-      if (sectionNum) seenSectionNums.add(sectionNum);
-      skipUntilNextHeading = false;
-    } else if (skipUntilNextHeading) {
-      // Nếu gặp heading mới không có số → kết thúc skip
-      if (/^#{1,4}\s+[A-Z\u00C0-\u1EF9a-z\u00E0-\u1EF9]/.test(trimmed) && !trimmed.match(/^#{1,4}\s+\d/)) {
-        skipUntilNextHeading = false;
-        // Không continue — line này sẽ được xử lý ở vòng lặp tiếp theo
-      } else {
-        continue;
-      }
-    }
-
-    outputLines.push(line);
-  }
-
-  if (removedCount > 0) {
-    console.log(`[DedupSection] Đã xóa ${removedCount} section có số mục trùng lặp`);
-  }
-
-  return outputLines.join("\n");
-};
-
-
-// ─────────────────────────────────────────────
-// POLISH DETERMINISTIC — thay thế bước AI selfCheck (nhanh hơn, ổn định hơn)
-// ─────────────────────────────────────────────
-const polishLessonContent = (content, coveredSections = []) => {
-  if (!content) return content;
-
-  let polished = fixOcrGluedWords(content);
-
-  // FIX: stripLessonMetadata trước — bắt cả heading "### Mục tiêu" + block bên dưới
-  // Gọi 1 lần duy nhất, bỏ lần gọi thứ 2 ở cuối (trùng lặp)
-  polished = stripLessonMetadata(polished);
-
-  polished = stripSupplementSections(polished);
-  polished = stripOutOfScopeSections(polished, coveredSections);
-  polished = removeDuplicateSections(polished);
-  polished = fixUnclosedCodeBlocks(polished);
-  polished = polished.replace(/\n{3,}/g, "\n\n").trim();
-
-  return polished;
-};
-
-// ─────────────────────────────────────────────
+// RAG SCORE FILTER (VERY IMPORTANT)
 // ─────────────────────────────────────────────
 
 const filterChunksByScore = (
@@ -1968,53 +1147,7 @@ const normalizeQuizBatch = (rawQuiz) => {
 };
 
 
-// ─────────────────────────────────────────────
-// FALLBACK QUIZ BUILDER — domain-agnostic
-// Tạo quiz cơ bản từ context text khi AI quiz fail.
-// KHÔNG hardcode theo SQL hay bất kỳ domain nào.
-// ─────────────────────────────────────────────
-const buildFallbackQuiz = (topic, contextText, importantNotes = [], minCount = 3, practiceBias = false) => {
-  // Fallback đơn giản: tạo câu hỏi skeleton từ importantNotes hoặc context
-  // Quiz này sẽ được lọc qua normalizeQuizItem nên cần đủ cấu trúc
-  const quizItems = [];
-  const src = String(contextText || "").slice(0, 3000);
-
-  // Trích các câu có dấu hiệu định nghĩa/phân loại
-  const candidates = [
-    ...importantNotes.slice(0, 6).map(n => String(n)),
-    ...(src.match(/^.{20,120}(?:là|is|được gọi là|defined as).{10,80}$/gm) || []).slice(0, 4),
-    ...(src.match(/^\s*\d+[.)].{15,100}$/gm) || []).slice(0, 4),
-  ].filter(s => s && s.length >= 20);
-
-  // Không đủ nguyên liệu → trả rỗng để pipeline xử lý tiếp
-  if (candidates.length < 2) return [];
-
-  for (let i = 0; i < Math.min(candidates.length, minCount); i++) {
-    const stem = candidates[i].replace(/^[\d.)\-•◦\s]+/, '').trim().slice(0, 120);
-    if (!stem || stem.length < 15) continue;
-
-    // Tạo câu hỏi yêu cầu chọn phát biểu đúng
-    const question = practiceBias
-      ? `Trong ngữ cảnh "${topic}", phát biểu nào sau đây mô tả đúng?`
-      : `Phát biểu nào sau đây đúng về "${topic}"?`;
-
-    // Đáp án A là stem thật, B-D là nhiễu generic
-    quizItems.push({
-      question,
-      options: [
-        stem.slice(0, 100),
-        `Đây là mô tả về một khái niệm khác, không liên quan đến ${topic}.`,
-        `Điều này hoàn toàn trái ngược với nội dung đã học.`,
-        `Đây là ví dụ minh họa, không phải định nghĩa.`,
-      ],
-      correctAnswer: 0,
-      explanation: `Theo tài liệu, ${stem.slice(0, 80)}.`,
-    });
-  }
-
-  return quizItems;
-};
-
+////111111111111111111111
 // ─────────────────────────────────────────────
 // LESSON DATA NORMALIZATION
 // ─────────────────────────────────────────────
@@ -2052,14 +1185,8 @@ const normalizeLessonData = (
 
   // ✅ FIX: Lọc sạch rác trước khi merge
   const cleanNote = (x) => {
-    const s = normalizeSpace(fixOcrGluedWords(String(x || "")));
+    const s = normalizeSpace(String(x || ""));
     if (!s) return null;
-
-    // ── MỚI: Chặn prompt leakage ─────────────────────────────────────────
-    if (/QUY TẮC BẮT BUỘC|YÊU CẦU OUTPUT|THÔNG TIN BÀI|CHẾ ĐỘ:/i.test(s)) return null;
-    if (/^(BẮT BUỘC|NGHIÊM CẤM|FORBIDDEN|CẤM TUYỆT ĐỐI|KHÔNG ĐƯỢC)/i.test(s)) return null;
-    if (/^(⚠️|❗|🎯|⛔|✅|🚫)/.test(s)) return null;
-    if (/(CHỈ DÙNG|KHÔNG BỊA|KHÔNG SỬ DỤNG|TỰ KIỂM TRA)/i.test(s)) return null;
 
     // Loại bỏ chunk metadata headers: [Context: ...], [BẢNG DỮ LIỆU...]
     if (/^\[Context:/i.test(s)) return null;
@@ -2074,11 +1201,11 @@ const normalizeLessonData = (
     if (/^https?:\/\//i.test(s)) return null;
     if (/^[\w./%-]+\.(asp|php|html?|aspx)\b/i.test(s)) return null;
     if (/^[\w-]+\/[\w-]+\//.test(s)) return null;
-
+ 
     // Bỏ qua code fragment bị cắt (bắt đầu hoặc kết thúc bằng dấu đặc biệt)
     if (/^[,+;/\\()\[\]]/.test(s.trim())) return null;
     if (/[+,]$/.test(s.trim()) && s.length < 80) return null;
-
+ 
     // Bỏ qua dòng không có đủ chữ (OCR noise)
     const letters = (s.match(/[a-zA-ZÀ-ỹ]/g) || []).length;
     if (letters < 6) return null;
@@ -2106,7 +1233,7 @@ const normalizeLessonData = (
     // Loại bỏ các ký tự đơn lẻ hoặc số đơn
     if (/^[\d\s\-\.]+$/.test(s.trim())) return null;
 
-    return fixOcrGluedWords(s);
+    return s;
   };
 
 
@@ -2159,74 +1286,6 @@ const normalizeLessonData = (
   };
 };
 
-
-
-const extractNotesFromMarkdown = (content = "") => {
-  const lines = content.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const results = [];
-  let insideCodeBlock = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // Track code block
-    if (/^```/.test(line)) { insideCodeBlock = !insideCodeBlock; continue; }
-    if (insideCodeBlock) continue;
-
-    // Bỏ qua tiêu đề, phân cách, prompt leakage
-    if (/^#{1,4}\s/.test(line)) continue;
-    if (/^[-=─]{2,}$/.test(line)) continue;
-    if (/QUY TẮC|BẮT BUỘC|KHÔNG ĐƯỢC|YÊU CẦU|CHỈ DÙNG/i.test(line)) continue;
-    if (/^(⚠️|❗|🎯|⛔|✅|🚫)/.test(line)) continue;
-    if (line.length < 15 || line.length > 250) continue;
-    const letters = (line.match(/[a-zA-ZÀ-ỹ]/g) || []).length;
-    if (letters < 8) continue;
-
-    // ── Detect các dạng có giá trị ──────────────────────────────────────
-    const isDef = /(là |được định nghĩa|khái niệm|định nghĩa:|có nghĩa là)/i.test(line);
-    const isRule = /^(\*\*Lưu ý|\*\*Chú ý|\*\*Quan trọng|Lưu ý:|Chú ý:|Quan trọng:)/i.test(line)
-      || /(khi .{5,} thì |nếu .{5,} thì |không được|phải |cần phải)/i.test(line);
-    const isEnum = /(có \d+ |gồm \d+ |phân thành|bao gồm:|\d+ loại|\d+ bước)/i.test(line);
-    const isBullet = /^[-*•]\s+.{30,}/.test(line)
-      && (isDef || isRule || isEnum
-        || /(ví dụ|ứng dụng|mục đích|đặc điểm|ưu điểm|nhược điểm)/i.test(line));
-
-    // ── Cú pháp / công thức: label + dòng kế tiếp ───────────────────────
-    const isFormulaLabel = /(cú pháp|syntax|công thức|formula|cấu trúc)[^a-zA-ZÀ-ỹ]*$/i.test(line);
-
-    if (isFormulaLabel) {
-      // Lấy tối đa 2 dòng tiếp theo làm nội dung
-      const nextLines = [];
-      for (let j = i + 1; j <= i + 2 && j < lines.length; j++) {
-        const next = lines[j].trim();
-        if (!next || /^#{1,4}\s/.test(next)) break;
-        nextLines.push(next.replace(/\*\*/g, ""));
-      }
-
-      if (nextLines.length > 0) {
-        const combined = line.replace(/\*\*/g, "").replace(/:\s*$/, "")
-          + ": "
-          + nextLines.join(" | ").slice(0, 180);
-        results.push(combined);
-        i += nextLines.length; // skip dòng đã dùng
-        continue;
-      }
-      // Nếu không có dòng tiếp theo thì bỏ qua label rỗng
-      continue;
-    }
-
-    // ── Công thức inline (có ký tự toán + chữ) ───────────────────────────
-    const isFormulaInline = /[=+\-*/^]/.test(line) && /[a-zA-ZÀ-ỹ]{4,}/.test(line)
-      && !/:\s*$/.test(line); // không phải label rỗng
-
-    if (isDef || isRule || isEnum || isBullet || isFormulaInline) {
-      const clean = line.replace(/\*\*/g, "").replace(/^[-*•]\s+/, "").trim();
-      if (clean.length >= 20) results.push(clean);
-    }
-  }
-
-  return [...new Set(results)].slice(0, 7);
-};
 // ─────────────────────────────────────────────
 // RAG: CHUNK SELECTION
 // ─────────────────────────────────────────────
@@ -2242,7 +1301,7 @@ const selectDiverseChunks = (
 
   const scored = chunks.map((chunk) => {
     const sig = getChunkSignature(chunk.content);
-    const prefix = sig.substring(0, 180);  // ✅ FIX: Tăng từ 80 → 180 để dedup chính xác, không loại oan chunk chỉ trùng heading
+    const prefix = sig.substring(0, 80);
 
     return {
       chunk,
@@ -2292,34 +1351,6 @@ const selectDiverseChunks = (
   return selected;
 };
 
-const isTocLikeChunk = (chunk) => {
-  const content = String(chunk?.content || "").trim();
-  if (!content) return true;
-
-  const section = String(chunk?.section || "").trim();
-  const firstLine = content.split(/\r?\n/)[0].trim();
-  const lowerFirst = firstLine.toLowerCase();
-
-  if (/^(mục lục|table of contents|nội dung|contents|index)\b/.test(lowerFirst)) return true;
-  if (/^(mục lục|table of contents|nội dung|contents|index)\b/i.test(section.toLowerCase())) return true;
-
-  const headingLines = content.split(/\r?\n/).slice(0, 5);
-  const numericLineCount = headingLines.filter((line) =>
-    /^\s*\d+(?:\.\d+)*\s*(?:\S.*)?$/.test(line.trim())
-  ).length;
-
-  if (numericLineCount >= 3 && !/[.!?]/.test(content.slice(0, 200))) return true;
-
-  if (content.length < 140 && /^[\d\s\.\-–—:;,]+$/.test(content)) return true;
-
-  return false;
-};
-
-const filterOutTocChunks = (chunks) =>
-  Array.isArray(chunks)
-    ? chunks.filter((chunk) => !isTocLikeChunk(chunk))
-    : [];
-
 // ─────────────────────────────────────────────
 // HyDE (Hypothetical Document Embedding)
 // ─────────────────────────────────────────────
@@ -2330,14 +1361,15 @@ const generateHyDE = async (topic, objective) => {
       messages: [
         {
           role: "user",
-          content: `Viết một đoạn mô tả kiến thức chi tiết (3-4 câu) cho chủ đề: "${topic}".
+          content: `Viết một đoạn mô tả kiến thức chi tiết (4-5 câu) cho chủ đề: "${topic}".
 Mục tiêu học: ${objective || topic}.
+Đề cập đến: định nghĩa, nguyên lý hoạt động, ứng dụng thực tế.
 Chỉ trả về đoạn văn, không giải thích thêm.`,
         },
       ],
       model: MODEL_FAST,
       temperature: 0.3,
-      maxTokens: 180,
+      maxTokens: 260,
     });
 
     return (response && response.trim()) || topic;
@@ -2358,8 +1390,6 @@ const buildConciseQuizPrompt = ({
   count,
   avoidQuestions = [],
   formulaNotes = [],
-  keyFacts = [],           // ← THÊM
-  codeIdentifiers = [],    // ← THÊM
 }) => {
   const avoidBlock = (avoidQuestions || [])
     .slice(0, 8)
@@ -2370,20 +1400,10 @@ const buildConciseQuizPrompt = ({
     ? `\nCONG THUC: ${formulaNotes.slice(0, 4).join("; ")}`
     : "";
 
-  // ✅ FIX: inject keyFacts để AI không bỏ sót khái niệm quan trọng
-  const keyFactsHint = Array.isArray(keyFacts) && keyFacts.length > 0
-    ? `\nCAC KHAI NIEM QUAN TRONG PHAI CO TRONG QUIZ:\n${keyFacts.slice(0, 6).map((f, i) => `${i + 1}. ${f}`).join("\n")}`
-    : "";
-
-  // ✅ FIX: inject identifiers giúp quiz dùng đúng tên thuật ngữ từ tài liệu
-  const identifierHint = Array.isArray(codeIdentifiers) && codeIdentifiers.length > 0
-    ? `\nTHUAT NGU CHINH XAC: ${codeIdentifiers.slice(0, 8).join(", ")}`
-    : "";
-
   return `Tao dung ${count} cau trac nghiem 4 phuong an de cung co kien thuc tu CONTEXT.
 
 TOPIC: ${searchTopic}
-MUC TIEU: ${objective || searchTopic}${formulaHint}${keyFactsHint}${identifierHint}
+MUC TIEU: ${objective || searchTopic}${formulaHint}
 
 QUY TAC:
 - Moi cau chi test 1 y
@@ -2446,8 +1466,6 @@ const generateQuizOnlyGroq = async ({
             count: c,
             avoidQuestions,
             formulaNotes,
-            keyFacts,          // ← THÊM
-            codeIdentifiers,   // ← THÊM
           }),
         },
       ],
@@ -2611,182 +1629,6 @@ const stripPromptLeakage = (content) => {
 };
 
 
-/**
- * 🔍 HÀM KIỂM DUYỆT CHỐNG SUY DIỄN (Fact Verification Pass)
- * Đối chiếu Draft bài giảng với Context gốc. Loại bỏ bất kỳ thông tin tự ý bịa đặt hoặc suy diễn nào.
- */
-const verifyLessonContent = async (draftContent, context, model = MODEL_FAST, coveredSections = []) => {
-  if (!draftContent || draftContent.length < 100) {
-    return { hasHallucinations: false, correctedContent: draftContent, hallucinations: [] };
-  }
-
-  const sectionsListBlock = Array.isArray(coveredSections) && coveredSections.length > 0
-    ? `\nDANH SÁCH TIÊU ĐỀ/CHỦ ĐỀ BẮT BUỘC PHẢI DẠY TRONG BÀI NÀY:\n${coveredSections.map((s, i) => `- [Mục ${i + 1}]: ${s}`).join("\n")}\n`
-    : "";
-
-  const prompt = `Bạn là một Verifier chuyên kiểm duyệt tài liệu giáo dục và đảm bảo độ bao phủ kiến thức (Knowledge Coverage Check) cho đa dạng lĩnh vực học thuật (như Khoa học, Công nghệ, Y học, Luật pháp, Kinh tế, Lập trình...).
-Nhiệm vụ: Đối chiếu bản nháp bài giảng (Draft) với tài liệu gốc (Context) để phát hiện lỗi sai lệch thông tin hoặc tự suy diễn (Hallucination) VÀ phát hiện xem bài giảng có bỏ sót kiến thức cốt lõi nào từ tài liệu gốc không (Coverage Check).
-${sectionsListBlock}
-⚠️ QUY TẮC PHÁT HIỆN & SỬA LỖI (BẮT BUỘC):
-1. KIỂM TRA ĐỘ BAO PHỦ BẮT BUỘC (KNOWLEDGE COVERAGE CHECK):
-   - Đọc kỹ danh sách "DANH SÁCH TIÊU ĐỀ/CHỦ ĐỀ BẮT BUỘC PHẢI DẠY" ở trên.
-   - Đối chiếu với bản nháp bài giảng (Draft). Nếu phát hiện bản nháp bỏ sót hoặc giải thích quá sơ sài bất kỳ tiêu đề/chủ đề nào trong danh sách trên, bạn bắt buộc phải trích xuất thông tin tương ứng từ CONTEXT gốc để bổ sung chi tiết vào "correctedContent".
-   - Đối với từng mục, phải viết rõ tiêu đề tương ứng và giải thích mạch lạc.
-
-2. CHỐNG HALLUCINATION (TRÁNH BỊA ĐẶT & SUY DIỄN):
-   - Đối chiếu từng định nghĩa, công thức, ví dụ minh họa, tên thực thể xuất hiện trong DRAFT với CONTEXT.
-   - Nếu DRAFT giải thích, định nghĩa hoặc bổ sung thêm các ví dụ, phương pháp thực hành, thông tin chi tiết mà CONTEXT hoàn toàn không nhắc đến -> Đó là HALLUCINATION.
-   - Hành động sửa lỗi: Cắt bỏ hoàn toàn phần thông tin tự ý suy diễn đó, hoặc thay thế bằng ghi chú trung thực: "Tài liệu gốc không đề cập nội dung này".
-   - Tuyệt đối chỉ sử dụng các ví dụ thực tế có sẵn trong CONTEXT. Nếu CONTEXT không có ví dụ cụ thể, hãy đổi thành giải thích lý thuyết thuần túy trích từ CONTEXT và ghi rõ: "Tài liệu không cung cấp ví dụ cụ thể cho trường hợp này."
-   - Nếu CONTEXT chứa "<!-- image -->" hoặc "[Hình]" → ghi rõ "*(Tài liệu gốc có hình minh họa tại đây)*" — KHÔNG tự bịa số liệu thay thế.
-3. TRẢ VỀ KẾT QUẢ:
-   - Trả về bài giảng hoàn chỉnh sau khi đã được bổ sung phần thiếu và loại bỏ phần bịa đặt. Định dạng Markdown gốc.
-
-CONTEXT GỐC:
-${context}
-
-DRAFT BÀI GIẢNG CẦN KIỂM DUYỆT:
-${draftContent}
-
-TRẢ VỀ ĐÚNG ĐỊNH DẠNG JSON SAU:
-{
-  "hasHallucinations": true/false,
-  "hallucinations": ["mô tả chi tiết lỗi sai lệch hoặc lỗi thiếu kiến thức quan trọng"],
-  "correctedContent": "Nội dung bài giảng hoàn chỉnh đã sạch lỗi hallucination, đã bổ sung đầy đủ kiến thức bị thiếu và đúng định dạng Markdown"
-}
-`;
-
-  try {
-    const resText = await makeGroqRequest({
-      messages: [
-        { role: "system", content: "Chỉ trả về JSON hợp lệ chứa correctedContent." },
-        { role: "user", content: prompt }
-      ],
-      model: model,
-      temperature: 0.0, // Đảm bảo tính nhất quán tuyệt đối
-      enforceJSON: true
-    });
-
-    const parsed = safeJSONParse(resText);
-    if (parsed && typeof parsed.correctedContent === "string" && parsed.correctedContent.length > 50) {
-      // ✅ FIX: Guard - reject nếu verifier cắt quá tay (correctedContent < 40% gốc)
-      const minAcceptableLength = Math.max(100, Math.floor(draftContent.length * 0.4));
-      if (parsed.correctedContent.length < minAcceptableLength) {
-        console.warn(
-          `[VerifyGuard] Rejected verifier output - too much cut ` +
-          `(${parsed.correctedContent.length} < ${minAcceptableLength} chars). Using draft.`
-        );
-        return { hasHallucinations: false, correctedContent: draftContent, hallucinations: [] };
-      }
-      return parsed;
-    }
-    return { hasHallucinations: false, correctedContent: draftContent, hallucinations: [] };
-  } catch (error) {
-    console.error("❌ [Verifier] Error during verification:", error.message);
-    return { hasHallucinations: false, correctedContent: draftContent, hallucinations: [] };
-  }
-};
-
-/**
- * 🔍 KIỂM TRA CHẤT LƯỢNG TEXT CÓ CẦN LLM LÀM SẠCH KHÔNG (Heuristics)
- * Giúp tránh lãng phí token & tránh dính lỗi rate limit 429 TPD từ Groq.
- */
-const checkTextQualityNeedsLLM = (text) => {
-  const t = String(text || "").trim();
-  if (t.length < 50) return false;
-
-  // 1. Chứa bảng biểu -> luôn cần LLM xử lý định dạng
-  if (t.includes("|")) return true;
-
-  // 2. Tách từ thành danh sách các từ
-  // Xóa các dấu câu ở đầu và cuối từ để tính độ dài chính xác
-  const words = t.split(/[\s,.\/#!$%\^&\*;:{}=\-_`~()?"']+/).filter(Boolean);
-
-  const viVowelsWithTone = /[áàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]/i;
-
-  for (const w of words) {
-    // A. Kiểm tra từ tiếng Anh CamelCase (như dnaPolymerase, StoredProcedure)
-    if (/[a-z]+[A-Z][a-z]+/.test(w)) return true;
-
-    // B. Nếu từ dài hơn 8 ký tự và có chứa chữ tiếng Việt có dấu -> khả năng rất cao bị dính chữ (ví dụ: "trongquatrinh")
-    if (w.length > 8 && viVowelsWithTone.test(w)) {
-      return true;
-    }
-
-    // C. Đếm số ký tự có dấu cách nhau bởi phụ âm trong cùng 1 từ (ví dụ: "nhânđôi" -> 'â' và 'ô' cách nhau bởi 'nđ')
-    const matches = w.match(/[áàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ]/gi) || [];
-    if (matches.length >= 2) {
-      let toneIndices = [];
-      for (let idx = 0; idx < w.length; idx++) {
-        if (viVowelsWithTone.test(w[idx])) {
-          toneIndices.push(idx);
-        }
-      }
-      for (let k = 0; k < toneIndices.length - 1; k++) {
-        if (toneIndices[k + 1] - toneIndices[k] > 2) {
-          return true; // cách nhau bởi phụ âm -> dính chữ
-        }
-      }
-    }
-  }
-
-  // 3. Kiểm tra độ dài từ trung bình quá lớn
-  if (words.length > 0) {
-    const avgLength = words.reduce((acc, w) => acc + w.length, 0) / words.length;
-    if (avgLength > 10) return true;
-  }
-
-  return false;
-};
-
-/**
- * 🧹 LLM POST-PROCESSING CHUNK (Đa lĩnh vực)
- * Sửa lỗi chính tả, dính chữ (glued words), lỗi font OCR, chuẩn hóa thuật ngữ chuyên môn.
- * Hoạt động domain-agnostic (Luật, Y tế, Kinh tế, Lập trình...).
- */
-const postProcessChunkWithLLM = async (rawChunkText) => {
-  if (!rawChunkText || rawChunkText.trim().length < 50) {
-    return rawChunkText;
-  }
-
-  // 🔥 CHỈ GỌI LLM KHI CẦN THIẾT (Selective processing)
-  // Tiết kiệm hơn 80% token và lượt gọi API, chống tuyệt đối rate limit 429
-  if (!checkTextQualityNeedsLLM(rawChunkText)) {
-    return rawChunkText;
-  }
-
-  const prompt = `Bạn là một chuyên gia hiệu đính tài liệu học thuật đa lĩnh vực đẳng cấp quốc tế.
-Nhiệm vụ: Sửa lỗi chính tả, tách các từ bị dính chữ (glued words), sửa lỗi font OCR và chuẩn hóa từ ngữ chuyên môn của đoạn văn bản dưới đây.
-
-⚠️ CÁC QUY TẮC BẮT BUỘC (BẢO VỆ THUẬT NGỮ CHUYÊN NGÀNH):
-1. KHÔNG DỊCH THUẬT NGỮ TIẾNG ANH:
-   - Các thuật ngữ chuyên ngành tiếng Anh (ví dụ: "dna", "dnaPolymerase", "nucleotide", "SQL", "StoredProcedure") phải được chuẩn hóa đúng dạng viết hoa/thường chuyên môn của chúng (ví dụ: "DNA", "DNA Polymerase", "nucleotide", "SQL", "Stored Procedure"). Tuyệt đối KHÔNG dịch nghĩa các thuật ngữ này sang tiếng Việt (ví dụ: KHÔNG dịch "dna" thành "và", "polymerase" thành "kích thích").
-2. SỬA LỖI FONT TIẾNG VIỆT & TÁCH DÍNH CHỮ:
-   - Các từ tiếng Việt bị dính liền do lỗi OCR (ví dụ: "trongquatrinh" -> "trong quá trình", "tìnhbáocáo" -> "tình báo cáo" hoặc "trình báo cáo" tùy ngữ cảnh chuyên môn) phải được tách ra chính xác.
-   - Sửa các từ bị lỗi dấu font chữ tiếng Việt (ví dụ: "Điềunày" -> "Điều này", "ditruyền" -> "di truyền") dựa vào ngữ cảnh học thuật của câu.
-3. BẢO TOÀN NỘI DUNG 100%:
-   - Giữ nguyên toàn bộ cấu trúc câu, các số liệu, ví dụ thực tế và thông tin học thuật. Không thêm bớt bất kỳ kiến thức ngoài tài liệu nào. KHÔNG viết thêm nhận xét hay tóm tắt.
-
-VĂN BẢN GỐC CẦN HIỆU ĐÍNH:
-${rawChunkText}
-
-Trả về văn bản đã làm sạch hoàn chỉnh (Chỉ trả về văn bản sau hiệu đính, không thêm bất kỳ văn bản dẫn giải nào khác):`;
-
-  try {
-    const cleanedText = await makeGroqPlainRequest({
-      messages: [{ role: "user", content: prompt }],
-      model: MODEL_FAST,
-      temperature: 0.0,
-      maxTokens: 2500
-    });
-    return cleanedText && cleanedText.trim().length > 20 ? cleanedText.trim() : rawChunkText;
-  } catch (err) {
-    console.warn("⚠️ [LLM Post-processing] Lỗi hoặc rate limit, giữ nguyên chunk gốc:", err.message);
-    return rawChunkText;
-  }
-};
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // ✍️ HÀM PHụ: VIẾT NỘI DUNG BÀI GIẢNG (generateLessonContent) — Phase 1
 //
@@ -2813,66 +1655,43 @@ const generateLessonContent = async ({
   previousSummaries, dayNumber, totalDays, item,
   usedConcepts,   // ← MỚI: concept memory từ các ngày trước
 }) => {
-  let budget = getDynamicLessonBudget(totalDays || 7);
-  const useSmarter = budget.useSmarter && profile.depth !== "basic";
-  const contentModel = useSmarter ? MODEL_SMART : MODEL_FAST;
-  // =========================
-  // CONTEXT GUARD
-  // =========================
-  const safeContext = fixOcrGluedWords(
-    smartTruncateContext(
-      String(context || "")
-        .replace(/[ \t]+/g, " ")
-        .replace(/\n{3,}/g, "\n\n"),
-      6500,
-      600   // luôn giữ 600 ký tự cuối (thường chứa ví dụ hoặc định nghĩa quan trọng)
-    )
-  );
+  const budget = getDynamicLessonBudget(totalDays || 7);
+  // Luôn dùng MODEL_SMART: prompt ~7000 tokens + budget output → 8b model (8192 ctx) không đủ
+  const contentModel = MODEL_SMART;
 
   // =========================
-  // TOKEN CAP KHI CONTEXT MỎNG
+  // CONTEXT GUARD (dùng context đã được cắt từ caller, chỉ normalize space)
   // =========================
-  const contextCharCount = safeContext.replace(/\s/g, "").length;
-  if (contextCharCount < 800) {
-    budget = { ...budget, contentTokens: Math.min(budget.contentTokens, 1200) };
-    console.warn(`[TokenCap] Context mỏng (${contextCharCount} chars) → cap ${budget.contentTokens}`);
-  } else if (contextCharCount < 2000) {
-    budget = { ...budget, contentTokens: Math.min(budget.contentTokens, 1800) };
-    console.warn(`[TokenCap] Context trung bình (${contextCharCount} chars) → cap ${budget.contentTokens}`);
-  }
+  const safeContext = String(context || "").replace(/\s+/g, " ").trim();
 
-  const previousBlock = previousSummaries?.length
-    ? previousSummaries
-      .map((p) => `• Ngày ${p.day}: "${p.title}" — ${p.summary || "(chưa có)"}`)
-      .join("\n")
-    : "Chưa có bài nào trước đó.";
+const previousBlock = previousSummaries?.length
+  ? previousSummaries
+    .map((p) => `• Ngày ${p.day}: "${p.title}" — ${p.summary || "(chưa có)"}`)
+    .join("\n")
+  : "Chưa có bài nào trước đó.";
 
-  const coveredSections = item?.coveredSections || [];
+const coveredSections = item?.coveredSections || [];
 
+  
+// =========================
+// FORBIDDEN + SCOPE
+// =========================
+const forbiddenTopics = (previousSummaries || [])
+  .map((p) => `"${p.title}"`)
+  .join(", ");
 
-  // =========================
-  // FORBIDDEN + SCOPE
-  // =========================
-  const forbiddenTopics = (previousSummaries || [])
-    .map((p) => `"${p.title}"`)
-    .join(", ");
-
-  const allowedNumsList = [...getAllowedSectionNums(coveredSections)];
-
-  const scopeBlock = coveredSections.length > 0
-    ? `━━━━━━━━━━ PHẠM VI BẮT BUỘC ━━━━━━━━━━
+const scopeBlock = coveredSections.length > 0
+  ? `━━━━━━━━━━ PHẠM VI BẮT BUỘC ━━━━━━━━━━
 NHIỆM VỤ HÔM NAY (Ngày ${dayNumber}/${totalDays}):
 Viết bài giảng về "${searchTopic}" tập trung vào:
 ${coveredSections.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}
 
-CHỈ ĐƯỢC DẠY các mục: ${allowedNumsList.join(", ") || "(theo danh sách trên)"}
 CẤM TUYỆT ĐỐI:
-- Viết bất kỳ mục X.Y nào KHÔNG nằm trong danh sách trên (ví dụ: nếu chỉ có 1.2, 1.3 thì CẤM viết 2.1, 2.4...)
-- Lặp lại cùng một mục X.Y nhiều lần trong bài
+- Nội dung ngoài danh sách trên
 - Nhắc lại hoặc dạy lại: ${forbiddenTopics || "(chưa có)"}
-- Tự suy diễn/bịa ví dụ ngoài CONTEXT
+- Tự suy diễn ngoài CONTEXT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
-    : `━━━━━━━━━━ PHẠM VI ━━━━━━━━━━
+  : `━━━━━━━━━━ PHẠM VI ━━━━━━━━━━
 NHIỆM VỤ HÔM NAY (Ngày ${dayNumber}/${totalDays}):
 Viết bài giảng về "${searchTopic}"
 MỤC TIÊU: ${objective || "Bám sát nội dung cốt lõi"}
@@ -2880,66 +1699,52 @@ CẤM dạy lại: ${forbiddenTopics || "(chưa có)"}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
 
-  // =========================
-  // EXAMPLE & IDENTIFIER HINT — domain-agnostic
-  // =========================
-  const identifiersList = Array.isArray(codeIdentifiers) && codeIdentifiers.length > 0
-    ? codeIdentifiers : [];
+// =========================
+// CODE EXAMPLE HINT — domain-agnostic
+// =========================
+const identifiersList = Array.isArray(codeIdentifiers) && codeIdentifiers.length > 0
+  ? codeIdentifiers : [];
 
-  const exampleHint = identifiersList.length > 0
-    ? `
-⚠️ THUẬT NGỮ / TÊN RIÊNG / KÝ HIỆU TRONG CONTEXT (ưu tiên dùng đúng các tên sau khi minh họa):
+const codeExampleHint = identifiersList.length > 0
+  ? `
+⚠️ TÊN KỸ THUẬT XUẤT HIỆN TRONG CONTEXT (chỉ được dùng những tên này):
 ${identifiersList.join(", ")}
 
-QUY TẮC MINH HỌA:
-- NẾU CONTEXT CÓ SẴN ví dụ (công thức, đoạn văn, bảng biểu, mã, sơ đồ) → TRÍCH NGUYÊN vào bài, giữ đúng tên/ký hiệu/số liệu.
-- KHÔNG đổi tên biến, ký hiệu, đại lượng sang tên khác.
-- KHÔNG tự bịa tên mới, số liệu mới, hay ví dụ giả lập không có trong tài liệu.
-- KHÔNG dùng placeholder mơ hồ (example, param1, tên_của_bạn, value_here, ...).
+QUY TẮC CODE:
+- CHỈ dùng tên/identifier có trong danh sách trên
+- KHÔNG bịa tên mới không có trong CONTEXT
+- KHÔNG dùng tên placeholder như "tenBang", "myFunction", "example"
+- Nếu không chắc tên chính xác → dùng văn xuôi thay vì code
 `
-    : `
-📄 CONTEXT KHÔNG CÓ VÍ DỤ CỤ THỂ:
-- Trình bày bằng văn xuôi và bullet points; không tự ý thêm ví dụ, số liệu hay trích dẫn ngoài tài liệu.
+  : `
+🚫 CONTEXT KHÔNG CÓ VÍ DỤ CODE CỤ THỂ:
+- KHÔNG viết code block nếu không có ví dụ trong CONTEXT
+- Giải thích bằng văn xuôi và bullet points
 `;
 
-  // =========================
-  // REQUIRED FACTS
-  // =========================
-  const factsList = Array.isArray(keyFacts) && keyFacts.length > 0 ? keyFacts : [];
-  // THAY THẾ requiredFactsBlock cũ
-  const requiredFactsBlock = factsList.length > 0
-    ? `
-❗ NỘI DUNG BẮT BUỘC ĐỀ CẬP (chỉ dùng nếu có trong CONTEXT):
+// =========================
+// REQUIRED FACTS
+// =========================
+const factsList = Array.isArray(keyFacts) && keyFacts.length > 0 ? keyFacts : [];
+const requiredFactsBlock = factsList.length > 0
+  ? `
+❗ NỘI DUNG BẮT BUỘC PHẢI ĐỀ CẬP (trích từ tài liệu gốc):
+- Nếu tài liệu liệt kê N loại/trường hợp → PHẢI viết đủ N loại, không bỏ sót.
 ${factsList.map((f, i) => `  [${i + 1}] ${f}`).join("\n")}
-
-QUY TẮC CITE: Khi đề cập bất kỳ điểm nào trong danh sách trên, bạn PHẢI trích dẫn
-nguyên văn tối thiểu 1 cụm từ từ CONTEXT để chứng minh thông tin có trong tài liệu.
-Nếu không tìm thấy trong CONTEXT → KHÔNG đề cập, thay bằng: "Tài liệu không đề cập [điểm này]."
 `
-    : "";
+  : "";
 
-  // =========================
-  // CONCEPT MEMORY BLOCK — domain-agnostic
-  // =========================
-  const conceptMemoryBlock = (() => {
-    const concepts = Array.isArray(usedConcepts) && usedConcepts.length > 0
-      ? usedConcepts : [];
-    if (!concepts.length) return "";
+// =========================
+// CONCEPT MEMORY BLOCK — domain-agnostic
+// =========================
+const conceptMemoryBlock = (() => {
+  const concepts = Array.isArray(usedConcepts) && usedConcepts.length > 0
+    ? usedConcepts : [];
+  if (!concepts.length) return "";
 
-    // ✅ FIX: Cap output của buildUsedConceptsBlock để không chiếm quá nhiều token
-    // Mục tiêu: conceptMemoryBlock tối đa ~600 chars (~150 tokens)
-    const MAX_CONCEPT_BLOCK_CHARS = 600;
-    let conceptList = buildUsedConceptsBlock(concepts);
+  const conceptList = buildUsedConceptsBlock(concepts);
 
-    if (conceptList.length > MAX_CONCEPT_BLOCK_CHARS) {
-      const truncated = conceptList.slice(0, MAX_CONCEPT_BLOCK_CHARS);
-      const lastNewline = truncated.lastIndexOf("\n");
-      conceptList = (lastNewline > 200 ? truncated.slice(0, lastNewline) : truncated)
-        + `\n... (còn ${concepts.length} khái niệm khác đã học)`;
-      console.warn(`[ConceptMemory] Truncated từ ${buildUsedConceptsBlock(concepts).length} → ${MAX_CONCEPT_BLOCK_CHARS} chars`);
-    }
-
-    return `
+  return `
 ⛔ ĐÃ DẠY Ở CÁC NGÀY TRƯỚC — KHÔNG DẠY LẠI:
 ${conceptList}
 
@@ -2949,102 +1754,55 @@ QUY TẮC (VI PHẠM = BÀI BỊ HỦY):
 3. Bài hôm nay PHẢI có ít nhất 1 khái niệm MỚI hoàn toàn không có trong danh sách.
 4. Trước khi viết mỗi đoạn: kiểm tra "khái niệm này đã dạy chưa?" → nếu rồi → BỎ QUA.
 `;
-  })();
+})();
 
-  // =========================
-  // MODE INSTRUCTIONS
-  // =========================
-  const isDeep = profile?.depth === "deep";
-  const isPractice = profile?.focus === "practice";
+// =========================
+// MODE INSTRUCTIONS
+// =========================
+const isDeep = profile?.depth === "deep";
+const isPractice = profile?.focus === "practice";
 
-  const practiceNote = isPractice
-    ? "\n- Với mỗi ví dụ: CHỈ dùng ví dụ CÓ SẴN trong CONTEXT, trích gần nguyên văn. KHÔNG tự đặt ví dụ mới."
-    : "\n- Nếu CONTEXT không có ví dụ cụ thể: ghi rõ \"*(Tài liệu không cung cấp ví dụ cho điểm này)*\". KHÔNG tự bịa.";
+let modeInstructions;
+if (isDeep && isPractice) {
+  modeInstructions = `
+🎯 CHẾ ĐỘ: THỰC HÀNH CHUYÊN SÂU
+- Ưu tiên: bài toán thực tế, phân tích edge case, so sánh giải pháp
+- Cấu trúc: Vấn đề → Phân tích → Giải pháp → Trường hợp ngoại lệ
+- Từ số: ${budget.targetWords}
+- Bắt buộc: ít nhất 1 bài tập tư duy cuối bài`;
+} else if (isDeep) {
+  modeInstructions = `
+🎯 CHẾ ĐỘ: LÝ THUYẾT CHUYÊN SÂU
+- Ưu tiên: nguyên lý nền tảng, lý giải tại sao, so sánh khái niệm tương đồng
+- Cấu trúc: Định nghĩa → Nguyên lý → Phân tích → So sánh → Ứng dụng
+- Từ số: ${budget.targetWords}
+- Mỗi section PHẢI có "Tại sao?" hoặc "Khi nào không dùng?"`;
+} else if (isPractice) {
+  modeInstructions = `
+🎯 CHẾ ĐỘ: THỰC HÀNH CƠ BẢN
+- Ưu tiên: hướng dẫn từng bước, ví dụ cụ thể, cách áp dụng
+- Từ số: ${budget.targetWords}`;
+} else {
+  modeInstructions = `
+🎯 CHẾ ĐỘ: LÝ THUYẾT CƠ BẢN
+- Ưu tiên: định nghĩa rõ ràng, ví dụ đơn giản, liệt kê có cấu trúc
+- Cấu trúc: Khái niệm → Ví dụ → Tóm tắt ghi nhớ
+- Từ số: ${budget.targetWords}
+- Mỗi khái niệm chính có ít nhất 1 ví dụ minh họa`;
+}
 
-  const wordTarget = isDeep
-    ? `${budget.targetWords} từ — ưu tiên chiều sâu, KHÔNG mở rộng ngoài CONTEXT`
-    : `${budget.targetWords} từ — súc tích, bám sát CONTEXT`;
+// =========================
+// MAIN PROMPT
+// =========================
+const contentPrompt = `Bạn là AI viết bài giảng.
 
-  let modeInstructions;
-  if (isDeep && isPractice) {
-    modeInstructions = `
-🎯 VAI TRÒ: EXTRACTOR — THỰC HÀNH CHUYÊN SÂU
-Nhiệm vụ: trích xuất và trình bày lại chi tiết những gì ĐÃ CÓ trong CONTEXT. KHÔNG bổ sung kiến thức ngoài tài liệu.
-- Cấu trúc: Vấn đề (từ CONTEXT) → Phân tích (từ CONTEXT) → Giải pháp (từ CONTEXT) → Trường hợp ngoại lệ (nếu CONTEXT đề cập)
-- Từ số: ${wordTarget}
-- Bài tập tư duy cuối bài: CHỈ đặt ra nếu CONTEXT có bài tập hoặc câu hỏi mẫu. Nếu không có, bỏ qua phần này.
-- Giải thích "tại sao" CHỈ khi CONTEXT có lý giải rõ ràng. Nếu không: ghi "*(Tài liệu không giải thích lý do này)*".${practiceNote}`;
-  } else if (isDeep) {
-    modeInstructions = `
-🎯 VAI TRÒ: EXTRACTOR — LÝ THUYẾT CHUYÊN SÂU
-Nhiệm vụ: phân tích và trình bày lại chi tiết những gì ĐÃ CÓ trong CONTEXT. KHÔNG bổ sung kiến thức ngoài tài liệu.
-- Cấu trúc: Định nghĩa (từ CONTEXT) → Nguyên lý (từ CONTEXT) → Phân tích (từ CONTEXT) → So sánh (nếu CONTEXT đề cập) → Ứng dụng (nếu CONTEXT đề cập)
-- Từ số: ${wordTarget}
-- "Tại sao?" hoặc "Khi nào không dùng?": CHỈ viết nếu CONTEXT có câu trả lời. Nếu không: ghi "*(Tài liệu không đề cập lý do hoặc giới hạn áp dụng)*".${practiceNote}`;
-  } else if (isPractice) {
-    modeInstructions = `
-🎯 VAI TRÒ: EXTRACTOR — THỰC HÀNH CƠ BẢN
-Nhiệm vụ: trình bày rõ ràng những gì ĐÃ CÓ trong CONTEXT. KHÔNG bổ sung kiến thức ngoài tài liệu.
-- Từ số: ${wordTarget}${practiceNote}`;
-  } else {
-    modeInstructions = `
-🎯 VAI TRÒ: EXTRACTOR — LÝ THUYẾT CƠ BẢN
-Nhiệm vụ: trình bày rõ ràng những gì ĐÃ CÓ trong CONTEXT. KHÔNG bổ sung kiến thức ngoài tài liệu.
-- Cấu trúc: Khái niệm (từ CONTEXT) → Ví dụ (từ CONTEXT nếu có) → Tóm tắt ghi nhớ
-- Từ số: ${wordTarget}${practiceNote}`;
-  }
-
-  const sectionsListBlock = coveredSections.length > 0
-    ? `
-📌 CÁC TIÊU ĐỀ/CHỦ ĐỀ BẮT BUỘC PHẢI GIẢNG DẠY (MỤC LỤC BẮT BUỘC):
-${coveredSections.map((s, idx) => `- Mục [${idx + 1}]: ${s}`).join("\n")}
-=> Bắt buộc viết bài giảng chi tiết cho TẤT CẢ các mục trên dựa trên CONTEXT. Nếu CONTEXT không có nội dung cho một mục nào đó, ghi rõ: "*(Tài liệu không cung cấp nội dung cho mục này)*". Tuyệt đối không tự bịa để lấp đầy.`
-    : "";
-
-  // =========================
-  // MAIN PROMPT
-  // =========================
-  const contentPrompt = `Bạn là một AI chuyên trích xuất và soạn thảo bài giảng học thuật đa lĩnh vực (Khoa học, Y tế, Luật pháp, Kinh tế, Lập trình, Database...).
-Nhiệm vụ của bạn là soạn thảo một nội dung bài học dựa trên tài liệu được cung cấp.
-
-${sectionsListBlock}
-
-⚠️ QUY TẮC BẮT BUỘC (TUÂN THỦ TUYỆT ĐỐI):
-1. VAI TRÒ TRỌNG TÂM LÀ EXTRACTOR thay vì GENERATOR (CẤM SUY DIỄN & BỊA ĐẶT):
-   - KHÔNG tự suy luận, KHÔNG tự ý sáng tạo.
-   - CHỈ sử dụng và giải thích các thông tin, định nghĩa, cú pháp, lệnh, tham số xuất hiện rõ ràng trong phần CONTEXT dưới đây.
-   - Nếu tài liệu không mô tả chi tiết hoặc không giải thích rõ về một khía cạnh nào đó, hãy ghi rõ: "Tài liệu không đề cập nội dung này". Tuyệt đối KHÔNG được bổ sung kiến thức bên ngoài, KHÔNG được suy đoán hay tự ý sáng tạo dưới mọi hình thức.
-2. KHÔNG TỰ TẠO VÍ DỤ MỚI:
-   - KHÔNG tự  đưa ra ví dụ mới không có trong tài liệu
-   - CHỈ trích xuất nguyên văn các ví dụ có sẵn trong CONTEXT.
-   - Nếu CONTEXT không có ví dụ cụ thể, hãy trình bày bằng lý thuyết thuần túy trích xuất từ CONTEXT và ghi rõ: "Tài liệu không cung cấp ví dụ cụ thể cho trường hợp này."
-3. KHÔNG LẶP LẠI BÀI CŨ: 
-   - Xem kỹ phần "BÀI TRƯỚC (CẤM LẶP)" bên dưới. Không định nghĩa lại, không giảng dạy lại các chủ đề/khái niệm đã được dạy.
-4. CẢI THIỆN ĐỊNH DẠNG & SỬA LỖI OCR:
-   - CONTEXT có thể chứa lỗi trích xuất (dính chữ, thiếu dấu cách, xuống dòng lỗi). Hãy sửa thành tiếng Việt/văn bản chuẩn, mạch lạc.
-5. TÍNH HOÀN THIỆN:
-   - Ví dụ trong bài (công thức, đoạn trích, bảng biểu, mã, quy trình, sự kiện, định nghĩa...) PHẢI đầy đủ như trong CONTEXT — không rút gọn, không bỏ phần quan trọng, không dùng "..." thay nội dung.
-   - KHÔNG dùng placeholder giả (example, param1, tên_của_bạn, ...) trừ khi có sẵn trong tài liệu.
-6. TRÌNH BÀY SƯ PHẠM:
-   - Cấu trúc: Mở đầu ngắn → Giải thích từng phần theo thứ tự → Minh họa ví dụ(nếu CONTEXT có ví dụ) → Tóm tắt ghi nhớ (3-6 bullet).
-   - Mỗi mục/section CHỈ xuất hiện 1 lần — không lặp ở cuối bài.
-   - CHỈ dạy nội dung thuộc phạm vi ngày hôm nay; không lấn sang phần của ngày khác.
-   - Markdown (##, ###, bullet); giọng văn giáo trình, không copy-paste máy móc.
-7. OUTPUT SẠCH:
-   - KHÔNG ghi metadata hệ thống (Ngày, Bloom, Chủ đề, Mục tiêu) trong bài học.
-   - KHÔNG thêm phần "Bổ sung" ngoài phạm vi.
-   - Giữ nguyên thuật ngữ, tên riêng, ký hiệu, số liệu từ CONTEXT.
-8. CHỐNG HALLUCINATION KỸ THUẬT VÀ HỌC THUẬT (QUAN TRỌNG):
-   - Nếu CONTEXT nói "dùng X để làm Y" → dùng đúng X. CẤM tự ý đổi thành Z dù Z cũng làm được Y.
-   - Số lượng tham số, tên bảng, tên cột, tên hàm, số liệu thực nghiệm: PHẢI khớp CHÍNH XÁC với CONTEXT.
-9. ĐÁNH SỐ MỤC:
-   - Giữ nguyên số mục (1.1, 2.3, ...) từ tài liệu gốc. KHÔNG tự đánh lại thành 1, 2, 3.
-   - Heading trong bài PHẢI dùng số mục gốc từ coveredSections (ví dụ: "### 1.5 ...", "### 2.3 ...").
-
-
-
+⚠️ QUY TẮC BẮT BUỘC:
+- CHỈ dùng thông tin từ CONTEXT bên dưới
+- KHÔNG suy diễn, KHÔNG thêm kiến thức ngoài CONTEXT
+- KHÔNG lặp lại nội dung các bài trước
+- Nếu thiếu dữ liệu → dừng lại, KHÔNG bịa
 ${conceptMemoryBlock}
-${exampleHint}
+${codeExampleHint}
 ${requiredFactsBlock}
 ${modeInstructions}
 ${scopeBlock}
@@ -3064,117 +1822,169 @@ THÔNG TIN BÀI:
 - Mục tiêu: ${objective || "Bám sát nội dung cốt lõi"}
 - Người học: ${selectedPersona}
 
-YÊU CẦU OUTPUT:
-- Markdown rõ ràng (##, ###, bullet)
-- KHÔNG có quiz, JSON, giải thích meta
+CẤU TRÚC BÀI GIẢNG — HARD FRAME + SOFT FRAME
+
+━━ HARD FRAME (BẮT BUỘC — không bỏ sót) ━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 1. Giới thiệu & Bối cảnh
+(1-3 câu: tại sao chủ đề này cần học, liên kết với kiến thức trước.
+Nếu CONTEXT không có thông tin nền → viết 1 câu giới thiệu chủ đề là đủ.)
+
+## 2. Nội dung chính
+[→ Xem SOFT FRAME bên dưới — chọn MỘT pattern phù hợp nhất với CONTEXT]
+
+## 3. Tổng kết & Ghi nhớ
+- Bullet 3-5 điểm then chốt rút ra từ CONTEXT
+- 1 câu bridge sang chủ đề tiếp (bỏ qua nếu là ngày ${dayNumber} = ngày cuối ${totalDays})
+
+━━ SOFT FRAME — CHỌN 1 PATTERN PHÙ HỢP VỚI CONTEXT ━━━━━━━━━━━━━━
+
+[SF-A] KHÁI NIỆM & CƠ CHẾ — dùng khi CONTEXT giải thích định nghĩa/nguyên lý:
+  ### Định nghĩa
+  ### Nguyên lý hoạt động
+  ### Ví dụ minh hoạ
+
+[SF-B] BÀI TẬP & ỨNG DỤNG — dùng khi CONTEXT chứa nhiều ví dụ/bài tập:
+  ### Bài toán mẫu
+  (trình bày đề bài rõ, giải từng bước)
+  ### Dạng bài thường gặp
+  ### Lưu ý khi làm bài
+
+[SF-C] CÔNG THỨC & TÍNH TOÁN — dùng khi CONTEXT có công thức/bảng số liệu:
+  ### Công thức cốt lõi
+  (viết rõ ý nghĩa từng biến)
+  ### Điều kiện áp dụng
+  ### Ví dụ tính toán
+
+[SF-D] CHỨNG MINH & SUY LUẬN — dùng khi CONTEXT là định lý/bổ đề/proof:
+  ### Phát biểu
+  ### Điều kiện / Giả thiết
+  ### Chứng minh (từng bước)
+  ### Hệ quả & Ứng dụng
+
+[SF-E] QUY TRÌNH & TIMELINE — dùng khi CONTEXT mô tả các bước/giai đoạn:
+  ### Tổng quan quy trình
+  ### Bước 1 / Giai đoạn 1...
+  ### Lưu ý & Điểm kiểm soát
+
+[SF-F] SO SÁNH & PHÂN LOẠI — dùng khi CONTEXT liệt kê nhiều loại/phương án:
+  ### Phân loại tổng quan
+  ### So sánh chi tiết (bảng nếu được)
+  ### Hướng dẫn chọn lựa
+
+NGUYÊN TẮC CHỌN SOFT FRAME:
+- Đọc CONTEXT → nhận diện nội dung thuộc dạng nào → chọn pattern tương ứng
+- KHÔNG bắt buộc dùng đúng tên section như template — tự điều chỉnh tên cho phù hợp chủ đề
+- Nếu CONTEXT pha trộn nhiều dạng → ghép 2 pattern, ưu tiên phần chiếm nhiều nhất
+- Nếu CONTEXT rất ngắn/thưa → dùng SF-A nhưng cho phép Section 2 ngắn hơn bình thường
+
+YÊU CẦU FORMAT:
+- Markdown chuẩn (##, ###, bullet, code fence nếu có code)
+- KHÔNG có quiz, JSON, hay meta-commentary
+- Mỗi phần ## PHẢI có ít nhất 2 dòng nội dung
 `;
 
   // =========================
   // GENERATOR
   // =========================
   const generateContent = async (temperature, extraInstruction = "") => {
-    // Thử với context đầy đủ trước, nếu 413 thì cắt context xuống
-    const contextLimits = [6500, 4000, 2500];
+    let content = await makeGroqPlainRequest({
+      messages: [
+        {
+          role: "system",
+          content:
+            "Bạn viết bài giảng Markdown. TUÂN THỦ NGHIÊM NGẶT phạm vi. Không được phép sáng tạo ngoài dữ liệu.",
+        },
+        {
+          role: "user",
+          content: contentPrompt + "\n\n" + extraInstruction,
+        },
+      ],
+      model: contentModel,
+      temperature,
+      maxTokens: budget.contentTokens,
+    });
 
-    for (const ctxLimit of contextLimits) {
-      // Chỉ cắt lại nếu safeContext dài hơn limit hiện tại (retry do 413)
-      const trimmedContext = safeContext.length > ctxLimit
-        ? smartTruncateContext(safeContext, ctxLimit)
-        : safeContext;
-      const promptWithCtx = contentPrompt
-        .replace(safeContext, trimmedContext);
+    // clean markdown wrapper
+    content = content
+      .replace(/^```(?:markdown|md)?\n?/i, "")
+      .replace(/\n?```$/i, "")
+      .trim();
 
-      try {
-        let content = await makeGroqPlainRequest({
-          messages: [
-            {
-              role: "system",
-              content: "Bạn viết bài giảng Markdown. TUÂN THỦ NGHIÊM NGẶT phạm vi. Không được phép sáng tạo ngoài dữ liệu. VAI TRÒ TRỌNG TÂM LÀ EXTRACTOR thay vì GENERATOR.",
-            },
-            {
-              role: "user",
-              content: promptWithCtx + "\n\n" + extraInstruction,
-            },
-          ],
-          model: contentModel,
-          temperature,
-          maxTokens: budget.contentTokens,
-        });
-
-        // ... phần clean content giữ nguyên
-        content = content
-          .replace(/^```(?:markdown|md)?\n?/i, "")
-          .replace(/\n?```$/i, "")
-          .replace(/(<!--\s*image\s*-->\s*\n?){3,}/gi,
-            "\n*(Tài liệu gốc có hình/công thức minh họa tại đây)*\n")
-          .replace(/(<!--\s*image\s*-->\s*\n?){1,2}/gi,
-            "*(hình minh họa)*\n")
-          .trim();
-
-        content = stripPromptLeakage(content);
-        for (const marker of ["### Quiz", "## Quiz", "---\n**Quiz"]) {
-          const idx = content.indexOf(marker);
-          if (idx !== -1) content = content.slice(0, idx).trim();
-        }
-        content = content
-          .split("\n")
-          .filter(line => {
-            const t = line.trim();
-            if (/^\*\s*\[Context:/i.test(t)) return false;
-            if (/^-\s*\[Context:/i.test(t)) return false;
-            if (/^\[Context:/i.test(t)) return false;
-            if (/^\[BẢNG DỮ LIỆU/i.test(t)) return false;
-            return true;
-          })
-          .join("\n")
-          .trim();
-
-        return content;
-
-      } catch (err) {
-        const is413 = err?.status === 413 || /413|too large|request too large/i.test(String(err?.message || ""));
-        if (is413 && ctxLimit > 2500) {
-          console.warn(`[TokenTrim] 413 với ctxLimit=${ctxLimit} → thử lại với ${contextLimits[contextLimits.indexOf(ctxLimit) + 1]}`);
-          continue; // thử lại với context ngắn hơn
-        }
-        throw err; // lỗi khác → throw bình thường
-      }
+      content = stripPromptLeakage(content);
+    // remove accidental quiz
+    for (const marker of ["### Quiz", "## Quiz", "---\n**Quiz"]) {
+      const idx = content.indexOf(marker);
+      if (idx !== -1) content = content.slice(0, idx).trim();
     }
 
-    throw new Error("Tất cả context limits đều thất bại");
+    // ✅ FIX: Xóa các dòng chunk metadata header lọt vào content
+    content = content
+      .split("\n")
+      .filter(line => {
+        const t = line.trim();
+        if (/^\*\s*\[Context:/i.test(t)) return false;   // * [Context: ...]
+        if (/^-\s*\[Context:/i.test(t)) return false;    // - [Context: ...]
+        if (/^\[Context:/i.test(t)) return false;         // [Context: ...]
+        if (/^\[BẢNG DỮ LIỆU/i.test(t)) return false;   // [BẢNG DỮ LIỆU...]
+        return true;
+      })
+      .join("\n")
+      .trim();
+
+
+
+    return content;
   };
 
 
   try {
-    // Ép temperature về 0.0 để tránh tối đa hallucination kỹ thuật ngẫu nhiên
-    let content = await generateContent(0.0);
+    let content = await generateContent(profile.focus === "practice" ? 0.2 : 0.1);
 
-    // POST-GEN: polish deterministic (OCR + scope + dedup) — không gọi AI thêm
+    // =========================
+    // POST-GEN: XÓA CODE BLOCK BỊA
+    // =========================
     content = stripInvalidCodeBlocks(content, safeContext);
-    content = polishLessonContent(content, coveredSections);
-    console.log(`[Polish] Day ${dayNumber} — OCR fix + scope strip + dedup`);
+    console.log(`[CodeGuard] Day ${dayNumber} — đã kiểm tra code blocks`);
 
+    // =========================
+    // SCOPE VALIDATION (FIX-UP)
+    // =========================
     const scopeResult = validateScopeCompliance(content, item, previousSummaries);
     if (!scopeResult.ok) {
       console.warn(`[ScopeGuard] Day ${dayNumber} violations:`, scopeResult.violations);
-      content = polishLessonContent(content, coveredSections);
+
+      // regenerate với constraint mạnh hơn
+      content = await generateContent(
+        0.05,
+        "Sửa lại: loại bỏ mọi nội dung ngoài phạm vi. Chỉ giữ nội dung hợp lệ."
+      );
+      // ✅ Strip lại sau regenerate
+      content = stripInvalidCodeBlocks(content, safeContext);
     }
 
+    // =========================
+    // ANTI DUP (SMART)
+    // =========================
     const dupResults = checkContentDuplication(content, previousSummaries);
     const highDup = dupResults.filter((d) => d.ratio > 65);
+
     if (highDup.length > 0) {
-      console.warn(`[AntiDup] Day ${dayNumber} high overlap (giữ nguyên, không regenerate):`, highDup);
+      console.warn(`[AntiDup] Day ${dayNumber} high overlap:`, highDup);
+
+      content = await generateContent(
+        0.05,
+        "Viết lại hoàn toàn. Tránh trùng lặp ý tưởng với các bài trước."
+      );
+      // ✅ Strip lại sau antidup regenerate
+      content = stripInvalidCodeBlocks(content, safeContext);
     }
 
-    // Chỉ regenerate 1 lần khi nội dung quá ngắn sau polish
-    if (content.length < 300) {
-      console.warn(`[ContentTooShort] Day ${dayNumber} → regenerate 1 lần`);
-      content = await generateContent(
-        0.0,
-        "Viết đầy đủ hơn, bám sát CONTEXT, không lặp mục, không thêm nội dung ngoài phạm vi."
-      );
-      content = stripInvalidCodeBlocks(content, safeContext);
-      content = polishLessonContent(content, coveredSections);
+    // =========================
+    // FINAL SAFETY CUT (FIX-NEW)
+    // =========================
+    if (content.length < 100) {
+      console.warn(`[ContentTooShort] Day ${dayNumber}`);
     }
 
     return content;
@@ -3230,16 +2040,18 @@ const generateSmartTitle = (text, index) => {
   return words && words.length > 10 ? words : `Chủ đề ${index + 1}`;
 };
 
-// Phân phối outline thành từng khối LIÊN TIẼP cho mỗi ngày (slice, không phải round-robin)
-// Ví dụ: outline=[1,2,3,4,5,6], 3 ngày → Ngày1=[1,2] / Ngày2=[3,4] / Ngày3=[5,6]
+// ✅ FIX: Chia block liên tiếp thay vì round-robin.
+// Round-robin cũ: ngày 1 ← section 1,8,15 (không liên quan)
+// Fix mới: ngày 1 ← section 1,2,3 (liên tiếp — hợp lý học thuật)
 const distributeSections = (outline, numDays) => {
   if (!outline.length) return Array.from({ length: numDays }, () => []);
-  const n = outline.length;
-  return Array.from({ length: numDays }, (_, i) => {
-    const start = Math.floor(i * n / numDays);
-    const end = Math.floor((i + 1) * n / numDays);
-    return outline.slice(start, end);
+  const result = Array.from({ length: numDays }, () => []);
+  const chunkSize = Math.ceil(outline.length / numDays);
+  outline.forEach((section, i) => {
+    const dayIdx = Math.min(Math.floor(i / chunkSize), numDays - 1);
+    result[dayIdx].push(section);
   });
+  return result;
 };
 
 const normalizeVN = (s) =>
@@ -3253,112 +2065,35 @@ const normalizeVN = (s) =>
 // ─────────────────────────────────────────────
 // FALLBACK PLAN (IMPROVED)
 // ─────────────────────────────────────────────
+
 const buildFallbackPreviewPlan = (text, days) => {
-  // FIX: Dùng lại extractDocumentOutline() thay vì tự parse heading
-  // extractDocumentOutline đã có đầy đủ filter:
-  //   - Loại tên chương tổng quát không có X.Y
-  //   - Loại heading # cấp 1 không có số mục
-  //   - Chỉ giữ số mục X.Y trở lên
-  const uniqueHeadings = extractDocumentOutline(text);
+  const clean = normalizeSpace(text || "").slice(0, 1500);
 
-  // Fallback nếu extractDocumentOutline trả về rỗng
-  // (tài liệu không có heading nào hợp lệ)
-  if (uniqueHeadings.length === 0) {
-    return Array.from({ length: days }, (_, i) => {
-      const bloom = getBloomLevel(i, days);
-      const title = `Phần ${i + 1}/${days}`;
-      return {
-        dayNumber: i + 1,
-        title,
-        objective: `Nắm vững nội dung ${bloom.vi} — ${title}`,
-        bloomLevel: bloom.label,
-        coveredSections: [title],
-      };
-    });
-  }
+  const parts = clean
+    .split(/[\n\r]+|(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 20);
 
-  // Phân bổ heading theo slice liên tiếp (giống distributeSections)
-  // Tránh nhiều ngày cùng trỏ về 1 heading khi outline ít hơn số ngày
+  const uniqueParts = [...new Set(parts)];
+
   return Array.from({ length: days }, (_, i) => {
-    const bloom = getBloomLevel(i, days);
+    const snippet =
+      uniqueParts[i] ||
+      uniqueParts[i % uniqueParts.length] ||
+      "Nắm vững nội dung cốt lõi";
 
-    const idx = Math.min(
-      Math.floor((i * uniqueHeadings.length) / days),
-      uniqueHeadings.length - 1
-    );
-    const title = uniqueHeadings[idx];
+    const bloom = getBloomLevel(i, days);
 
     return {
       dayNumber: i + 1,
-      title,
-      objective: `Nắm vững nội dung ${bloom.vi} — ${title}`,
+      title: generateSmartTitle(snippet, i),
+      objective: snippet.slice(0, 140),
       bloomLevel: bloom.label,
-      coveredSections: [title],
+      coveredSections: [snippet.slice(0, 60)],
     };
   });
 };
 
-
-// Thêm "chương", "bài", "unit", "module" vào blacklist
-// Giúp cho mọi loại tài liệu (không chỉ SQL)
-const GENERIC_TITLE_RE = /^(cơ sở dữ liệu|tổng quan|giới thiệu|introduction|overview|nội dung|bài học|chủ đề|khóa học|tài liệu|chương|chapter|phần|section|bài|unit|module)(\s|$)/i;
-/**
- * Làm sạch và chuẩn hóa title AI trả về cho 1 ngày học.
- * - Strip ký tự đặc biệt: **, *, |, #, backtick
- * - Nếu có số mục X.Y → giữ số mục + 5 từ đầu
- * - Nếu title generic/không số mục → dùng section được phân công
- */
-const cleanSyllabusTitle = (raw, assignedSections = [], dayIndex = 0) => {
-  let t = String(raw || "")
-    .replace(/\*+/g, "")
-    .replace(/#+\s*/g, "")
-    .replace(/[|`]/g, " ");
-
-  // ✅ Xóa các chấm lửng mục lục OCR và số trang ở cuối
-  t = t.replace(/\s*[.…_~-\s]+\s*\d+$/, "");
-  t = t.replace(/\s*[.…_~-]+\s*$/, "");
-  t = t.replace(/[.…]{2,}/g, "");
-  t = t.replace(/\s{2,}/g, " ").trim();
-
-  const numMatch = t.match(/(\d+(?:\.\d+)+)\s+(.+)/);
-  if (numMatch) {
-    const rest = numMatch[2].trim();
-
-    // ✅ Chỉ giữ phần MÔ TẢ CHỦ ĐỀ, KHÔNG kèm số mục (1.2, 1.4...)
-    // → Tránh hiển thị "1.2 Stored Procedure" gây ấn tượng bỏ sót 1.1, 1.3
-    // → Số mục vẫn được lưu trong coveredSections để RAG tìm đúng
-    const cutAtPunct = rest.search(/[,;:()[\]-]/);
-    const shortRest = cutAtPunct > 15
-      ? rest.slice(0, cutAtPunct).trim()
-      : rest.split(/\s+/).slice(0, 10).join(" ");
-
-    return shortRest.slice(0, 100);
-  }
-
-  // Fallback về section được phân công — cũng strip số mục
-  if ((GENERIC_TITLE_RE.test(t) || t.length < 8) && assignedSections.length > 0) {
-    const numbered = assignedSections.find(s => /\d+\.\d+/.test(String(s)));
-    if (numbered) {
-      const strippedNum = String(numbered)
-        .replace(/^\d+(?:\.\d+)+\s*/, "")  // bỏ số mục đầu
-        .replace(/\s*[.…_~-\s]+\s*\d+$/, "")
-        .replace(/\s*[.…_~-]+\s*$/, "")
-        .slice(0, 100);
-      // Nếu sau khi strip vẫn còn text có nghĩa → dùng
-      if (strippedNum.length >= 5) return strippedNum;
-    }
-    return String(assignedSections[0])
-      .replace(/^\d+(?:\.\d+)+\s*/, "")
-      .replace(/\s*[.…_~-\s]+\s*\d+$/, "")
-      .replace(/\s*[.…_~-]+\s*$/, "")
-      .split(/\s+/)
-      .slice(0, 10)
-      .join(" ")
-      .slice(0, 100);
-  }
-
-  return t.length > 100 ? t.split(/\s+/).slice(0, 10).join(" ") : t;
-};
 // ─────────────────────────────────────────────
 // GENERATE SYLLABUS (FIXED PRODUCTION VERSION)
 // ─────────────────────────────────────────────
@@ -3381,247 +2116,121 @@ const cleanSyllabusTitle = (raw, assignedSections = [], dayIndex = 0) => {
 //   - Nếu AI trả về thừa ngày → cắt bịt phần thừa
 //   - Nếu một ngày không có coveredSections → tự gán từ outline của tài liệu
 // ─────────────────────────────────────────────────────────────────────────────
-const SYLLABUS_TEXT_LIMIT = 8000;
-
-// ✅ Lấy outline đầy đủ + sample content mỗi chương
-const buildRepresentativeText = (text, limit = 8000) => {
-  // Ưu tiên 1: Lấy toàn bộ các dòng heading (số mục X.Y)
-  const headingLines = text.split(/\r?\n/)
-    .filter(l => /^\d+\.\d+/.test(l.trim()) || /^#{1,3}\s+\d+\.\d+/.test(l.trim()))
-    .join('\n');
-
-  // Ưu tiên 2: Lấy 400 ký tự đầu mỗi section lớn
-  const sections = text.split(/(?=\n\d+\.\d+\s|\n#{1,2}\s+\d+)/);
-  const sampledSections = sections.map(s => s.slice(0, 400)).join('\n---\n');
-
-  const combined = headingLines + '\n\n' + sampledSections;
-  return combined.slice(0, limit);
-};
-
 const generateSyllabus = async (rawText, numDays, learningGoalsInput = null) => {
   const learningGoals = normalizeLearningGoals(learningGoalsInput || {});
   const textForOutline = mergeBrokenNumberedHeadings(rawText || "");
   const objectiveSeeds = getObjectiveSeedsFromText(textForOutline, numDays);
   const outline = extractDocumentOutline(textForOutline);
 
-  // ─────────────────────────────────────────────
-  // BƯỚC 1: Phân công trước — slice LIÊN TIẾP
-  // ─────────────────────────────────────────────
-  const distributedSections = distributeSections(outline, numDays);
-  const fallbackPlan = buildFallbackPreviewPlan(textForOutline, numDays);
+  const outlineBlock =
+    outline.length > 0
+      ? outline.map((h, i) => `${i + 1}. ${h}`).join("\n")
+      : "(Không nhận diện được outline — dùng text thô)";
 
-  // ─────────────────────────────────────────────
-  // BƯỚC 2: Build prompt
-  // ─────────────────────────────────────────────
-  const outlineBlock = outline.length > 0
-    ? outline.map((h, i) => `${i + 1}. ${h}`).join("\n")
-    : "(Không nhận diện được outline — dùng text thô)";
-
-  const breadthNote = outline.length > numDays
-    ? `\nCHIẾN LƯỢC GỘP: ~${outline.length} phần / ${numDays} ngày → mỗi ngày gộp nhiều mục.`
-    : "";
+  const breadthNote =
+    outline.length > numDays
+      ? `\nCHIẾN LƯỢC GỘP: ~${outline.length} phần / ${numDays} ngày → mỗi ngày phải gộp.`
+      : "";
 
   const bloomHints = Array.from({ length: numDays }, (_, i) => {
     const bloom = getBloomLevel(i, numDays);
-    return `Ngày ${i + 1} → ${bloom.vi} (${bloom.label})`;
+    return `Ngay ${i + 1} -> ${bloom.vi} (${bloom.label})`;
   }).join("\n");
 
-  const outlineAssignment = outline.length
-    ? distributedSections.map((sections, i) =>
-      sections.length
-        ? `Ngày ${i + 1}: ${sections.join(" | ")}`
-        : `Ngày ${i + 1}: (chia sâu từ phần gần nhất)`
-    ).join("\n")
-    : "";
-
-  // Skeleton: buộc AI điền đúng số ngày
+  // Tạo skeleton dayNumber để nhắc AI phải điền đủ
   const daySkeleton = Array.from({ length: numDays }, (_, i) =>
     `{"dayNumber":${i + 1},"title":"...","objective":"...","bloomLevel":"${getBloomLevel(i, numDays).label}","coveredSections":["..."]}`
   ).join(',\n');
 
   const syllabusPrompt = `Bạn là chuyên gia thiết kế chương trình học.
- 
-⚠️ BẮT BUỘC:
-- Trả về ĐÚNG ${numDays} object trong mảng "syllabus" — KHÔNG được dừng sớm.
-- Mỗi "title" PHẢI lấy từ số mục + tên section được phân công (ví dụ: "1.2 Stored Procedure cơ bản").
-- KHÔNG đặt tiêu đề chung chung như "Cơ sở dữ liệu nâng cao", "Giới thiệu", "Tổng quan".
-- KHÔNG lặp lại title giữa các ngày.
- 
+
+⚠️ BẮT BUỘC: Trả về ĐÚNG ${numDays} object trong mảng "syllabus".
+⚠️ KHÔNG ĐƯỢC dừng sớm. Mảng syllabus phải có ĐÚNG ${numDays} phần tử.
+
 OUTLINE tài liệu:
 ${outlineBlock}
 ${breadthNote}
- 
-PHÂN CÔNG TỪNG NGÀY (BẮT BUỘC tuân theo):
-${outlineAssignment}
- 
-MỤC TIÊU HỌC VIÊN: ${syllabusBiasInstructions(learningGoals)}
- 
+
+MỤC TIÊU: ${syllabusBiasInstructions(learningGoals)}
+
 BLOOM từng ngày:
 ${bloomHints}
- 
-QUY TẮC NGHIÊM NGẶT:
-1. title: Tên chủ đề ngắn gọn, KHÔNG có số mục — tối đa 8 từ, mô tả đúng nội dung ngày đó.
-   - ĐÚNG: "Stored Procedure cơ bản", "Giao dịch và ACID", "Biến và câu lệnh điều kiện"
-   - SAI: "1.1 Stored Procedure cơ bản", "Cơ sở dữ liệu nâng cao", "Giao dịch** | 1.1"
-   - TUYỆT ĐỐI KHÔNG đặt số mục (1.1, 2.3...) vào trường title
-   - TUYỆT ĐỐI KHÔNG dùng tên tài liệu/chương tổng quát làm title
-   - TUYỆT ĐỐI KHÔNG có ký tự **, *, |, # trong title
-2. coveredSections: PHẢI chứa đúng các section được phân công (có số mục, ví dụ: "1.2 Stored Procedure...").
-3. objective: mô tả cụ thể sẽ học gì — KHÔNG dùng "tổng quan", "giới thiệu".
-4. Mỗi ngày chỉ dạy phần đã được phân công — KHÔNG lấn sang ngày khác.
-5. coveredSections KHÔNG được rỗng.
-6. Hoàn thành toàn bộ một chương trước khi chuyển chương tiếp.
- 
-TRẢ VỀ JSON (điền đầy đủ ${numDays} ngày):
+
+QUY TẮC:
+1. Bao phủ toàn bộ outline
+2. Không trùng lặp chủ đề
+3. coveredSections KHÔNG được rỗng
+4. Logic: cơ bản → nâng cao
+5. Tiêu đề <= 6 từ
+
+TRẢ VỀ JSON sau (điền đầy đủ ${numDays} ngày):
 {
-  "title": "...",
-  "syllabus": [
+"title": "...",
+"syllabus":[
 ${daySkeleton}
-  ]
+]
 }`;
 
-  // ─────────────────────────────────────────────
-  // BƯỚC 3: Gọi AI
-  // ─────────────────────────────────────────────
-  // ✅ Dùng MODEL_SMART (70b) — sinh JSON ổn định hơn 8b với prompt có cấu trúc phức tạp
-  // ✅ Áp dụng thuật toán buildRepresentativeText để giữ độ phủ (coverage) cho tài liệu dài nhiều chương
-  const truncatedText = buildRepresentativeText(textForOutline, SYLLABUS_TEXT_LIMIT);
+  const response = await makeGroqRequest({
+    messages: [
+      { role: "system", content: "Chỉ trả về JSON hợp lệ." },
+      { role: "user", content: syllabusPrompt + "\n\nTEXT:\n" + textForOutline.substring(0, MAX_SYLLABUS_TEXT) }
+    ],
+    model: MODEL_FAST,
+    temperature: 0.1,
+    maxTokens: Math.max(4000, numDays * 350), // ~350 tokens/ngày để đủ cho 14 ngày
+    enforceJSON: true,
+  });
 
-  let response;
-  try {
-    response = await makeGroqRequest({
-      messages: [
-        {
-          role: "system",
-          content: `Chỉ trả về JSON hợp lệ. KHÔNG dùng markdown code block. KHÔNG thêm text trước/sau.
-Output phải bắt đầu bằng { và kết thúc bằng }.
-Ví dụ đúng: {"title":"...","syllabus":[...]}
-Ví dụ SAI: \`\`\`json{"title":"..."}\`\`\``
-        },
-        {
-          role: "user",
-          content: syllabusPrompt + "\n\nTEXT:\n" + truncatedText
-        }
-      ],
-      model: MODEL_SMART,
-      temperature: 0.1,
-      maxTokens: Math.max(1500, numDays * 300),
-      enforceJSON: true,
-    });
-  } catch (err) {
-    console.warn("[generateSyllabus] AI call failed:", err.message, "→ dùng fallback");
+  let data = safeJSONParse(response);
+
+  // 🔥 JSON fallback
+  if (!data || !Array.isArray(data.syllabus)) {
+    console.warn("[Syllabus] JSON lỗi → fallback");
     return {
-      title: fallbackPlan[0]?.title || "Khóa học tự động",
-      syllabus: fallbackPlan,
+      title: "Khóa học tự động",
+      syllabus: buildFallbackPreviewPlan(textForOutline, numDays),
     };
   }
 
-  // ─────────────────────────────────────────────
-  // BƯỚC 3.5: Parse + validate sớm
-  // ─────────────────────────────────────────────
-  let data;
-  try {
-    // Phát hiện sớm AI trả về prose thay vì JSON
-    const trimmed = String(response || "").trimStart();
-    const hasJsonStart = trimmed.includes("{") || trimmed.includes("[");
-    if (!hasJsonStart) {
-      console.warn(`[Syllabus] AI trả về pure prose, không có JSON → fallback`);
-      throw new Error("AI returned prose instead of JSON");
-    }
-    // safeJSONParse đã tự strip backtick + preamble
-    data = safeJSONParse(response);
-  } catch (e) {
-    console.warn("[Syllabus] JSON parse lỗi → fallback:", e.message);
-  }
-
-  if (!data || !Array.isArray(data.syllabus) || data.syllabus.length === 0) {
-    console.warn("[Syllabus] Dữ liệu không hợp lệ → dùng fallback toàn bộ");
-    return {
-      title: fallbackPlan[0]?.title || "Khóa học tự động",
-      syllabus: fallbackPlan,
-    };
-  }
-
-  // Trim thừa ngay từ đầu
-  if (data.syllabus.length > numDays) {
-    console.warn(`[Syllabus] AI trả về ${data.syllabus.length} ngày → cắt xuống ${numDays}`);
-    data.syllabus = data.syllabus.slice(0, numDays);
-  }
-
-  // ─────────────────────────────────────────────
-  // BƯỚC 4: Post-process từng ngày
-  // ─────────────────────────────────────────────
   const usedTitles = new Set();
   const usedObjectives = new Set();
 
+  const distributedSections = distributeSections(outline, numDays);
+
   const syllabus = data.syllabus.map((item, i) => {
+    let title = item.title || "";
+    let objective = normalizeSpace(item.objective || "");
     const bloom = getBloomLevel(i, numDays);
 
-    // ── TITLE ─────────────────────────────────
-    // cleanSyllabusTitle: strip ký tự đặc biệt, enforce số mục, fallback về section
-    let title = cleanSyllabusTitle(
-      item.title || "",
-      distributedSections[i] || [],
-      i
-    );
-
-    // Enforce unique: thay số mục nếu trùng
-    let titleKey = normalizeTitle(title).replace(/\d/g, "").trim() || `ngay_${i + 1}`;
-    if (usedTitles.has(titleKey)) {
-      const assignedSections = distributedSections[i] || [];
-      const altSection = assignedSections.find(s => /\d+\.\d+/.test(String(s)));
-      const altNum = altSection
-        ? (String(altSection).match(/^(\d+(?:\.\d+)+)/) || [])[1]
-        : null;
-
-      if (altNum) {
-        title = title.replace(/^\d+(?:\.\d+)+\s*/, `${altNum} `).trim();
-      } else {
-        title = `${title.replace(/\s*\(\d+\)$/, "")} (${i + 1})`;
-      }
-      titleKey = normalizeTitle(title).replace(/\d/g, "").trim() || `ngay_${i + 1}`;
-    }
-    usedTitles.add(titleKey);
-
-    // ── OBJECTIVE ─────────────────────────────
-    let objective = normalizeSpace(item.objective || "");
+    // FIX objective rỗng / generic
     const objKey = objective.slice(0, 60).toLowerCase();
-    const objGeneric =
+    const isGeneric =
       !objective ||
       objective.length < 20 ||
-      /(tổng quan|giới thiệu|overview|introduction)/i.test(objective) ||
+      /(tong quan|gioi thieu|overview|introduction)/i.test(objective) ||
       usedObjectives.has(objKey);
 
-    if (objGeneric) {
-      objective = objectiveSeeds[i] || `Nắm vững nội dung ${bloom.vi} ngày ${i + 1}.`;
+    if (isGeneric) {
+      objective =
+        objectiveSeeds[i] ||
+        `Nắm vững nội dung ${bloom.vi} ngày ${i + 1}.`;
     }
     usedObjectives.add(objective.slice(0, 60).toLowerCase());
 
-    // ── COVERED SECTIONS ──────────────────────
-    let coveredSections = (item.coveredSections || [])
-      .map(s => normalizeSpace(String(s)))
-      .filter(s => s.length > 3);
-
-    const hasNumbered = coveredSections.some(s => /\d+\.\d+/.test(s));
-
-    if (hasNumbered && outline.length > 0) {
-      // Remap số mục AI → heading đúng trong outline
-      coveredSections = coveredSections.map(aiSection => {
-        const aiNum = (String(aiSection).match(/^(\d+(?:\.\d+)+)/) || [])[1];
-        if (!aiNum) return aiSection;
-        const exactMatch = outline.find(h => {
-          const hNum = (String(h).match(/^(\d+(?:\.\d+)+)/) || [])[1];
-          return hNum === aiNum;
-        });
-        return exactMatch || aiSection;
-      });
-      coveredSections = [...new Set(coveredSections)];
-    } else if (!hasNumbered && distributedSections[i]?.length) {
-      coveredSections = distributedSections[i];
-      console.log(`[Syllabus] Day ${i + 1}: dùng distributedSections`, coveredSections);
+    // FIX duplicate title
+    let titleKey = normalizeTitle(title).replace(/\d+/g, "");
+    let suffix = 2;
+    while (usedTitles.has(titleKey)) {
+      title = `${title} (${suffix})`;
+      suffix++;
     }
+    usedTitles.add(titleKey);
 
-    // Fallback cuối nếu vẫn rỗng
+    // FIX coveredSections
+    let coveredSections = (item.coveredSections || []).filter(Boolean);
+    coveredSections = coveredSections.filter((s) => s.length > 3);
+
     if (coveredSections.length === 0) {
       if (distributedSections[i]?.length) {
         coveredSections = distributedSections[i];
@@ -3630,7 +2239,8 @@ Ví dụ SAI: \`\`\`json{"title":"..."}\`\`\``
       } else {
         coveredSections = [title || `Nội dung ngày ${i + 1}`];
       }
-      console.log(`[Syllabus] Day ${i + 1}: auto-fill sections`, coveredSections);
+
+      console.log(`[FIX] Day ${i + 1}: auto-fill sections`, coveredSections);
     }
 
     return {
@@ -3642,88 +2252,63 @@ Ví dụ SAI: \`\`\`json{"title":"..."}\`\`\``
     };
   });
 
-  // ─────────────────────────────────────────────
-  // BƯỚC 5: Coverage check — phân bổ đều, không dồn vào ngày cuối
-  // ─────────────────────────────────────────────
+  // 🔥 coverage check (improved)
   if (outline.length > 0) {
     const coveredSet = new Set(
-      syllabus.flatMap(s => s.coveredSections.map(c => normalizeVN(c).slice(0, 30)))
+      syllabus.flatMap((s) => s.coveredSections.map(normalizeVN))
     );
 
-    const uncovered = outline.filter(sec => {
+    const uncovered = outline.filter((sec) => {
       const key = normalizeVN(sec).slice(0, 30);
       return key.length > 4 && !coveredSet.has(key);
     });
 
     if (uncovered.length > 0) {
-      console.warn(`[Coverage] Bổ sung ${uncovered.length} sections bị thiếu`);
-      uncovered.forEach(sec => {
-        const targetDay = syllabus.reduce((min, day) =>
-          day.coveredSections.length < min.coveredSections.length ? day : min
-          , syllabus[0]);
+      console.warn(`[Coverage] Missing sections:`, uncovered.slice(0, 5));
 
-        if (!targetDay.coveredSections.includes(sec)) {
-          targetDay.coveredSections.push(sec);
-          console.log(`[Coverage] Gán "${sec.slice(0, 40)}" → Day ${targetDay.dayNumber}`);
+      uncovered.forEach((sec, idx) => {
+        const target =
+          syllabus[syllabus.length - 1 - (idx % syllabus.length)];
+        if (target && !target.coveredSections.includes(sec)) {
+          target.coveredSections.push(sec);
         }
       });
     }
   }
 
-  // ─────────────────────────────────────────────
-  // BƯỚC 6: Chống trộn chương — mỗi ngày chỉ 1 chương chính
-  // ─────────────────────────────────────────────
-  const outlineHasNumbered = outline.some(s => /^\d+\./.test(s));
-  if (outlineHasNumbered) {
-    syllabus.forEach((day, i) => {
-      const majorChapters = new Set(
-        day.coveredSections
-          .map(s => (String(s).match(/^(\d+)\./) || [])[1])
-          .filter(Boolean)
-      );
+  // 🔥 HARD FIX: AI thường trả về ít ngày hơn numDays yêu cầu
+  // → pad thêm ngày còn thiếu bằng fallback, trim nếu thừa
+  if (syllabus.length !== numDays) {
+    console.warn(`[Syllabus] AI trả về ${syllabus.length} ngày, yêu cầu ${numDays} → điều chỉnh`);
 
-      if (majorChapters.size > 1) {
-        const firstChapter = [...majorChapters][0];
-        const filtered = day.coveredSections.filter(s => {
-          const major = (String(s).match(/^(\d+)\./) || [])[1];
-          return !major || major === firstChapter;
-        });
-        if (filtered.length > 0) {
-          console.warn(`[ChapterGuard] Day ${i + 1}: loại chương lẫn lộn`, [...majorChapters]);
-          day.coveredSections = filtered;
-        }
+    if (syllabus.length < numDays) {
+      // Pad thêm các ngày còn thiếu
+      const fallback = buildFallbackPreviewPlan(textForOutline, numDays);
+      for (let i = syllabus.length; i < numDays; i++) {
+        const bloom = getBloomLevel(i, numDays);
+        syllabus.push(
+          fallback[i] || {
+            dayNumber: i + 1,
+            title: `Nội dung ngày ${i + 1}`,
+            objective: `Nắm vững nội dung ${bloom.vi} ngày ${i + 1}.`,
+            bloomLevel: bloom.label,
+            coveredSections: [outline[i % Math.max(outline.length, 1)] || `Phần ${i + 1}`],
+          }
+        );
       }
-    });
-  }
-
-  // ─────────────────────────────────────────────
-  // BƯỚC 7: Pad / trim về đúng numDays
-  // ─────────────────────────────────────────────
-  if (syllabus.length < numDays) {
-    console.warn(`[Syllabus] Thiếu ${numDays - syllabus.length} ngày → pad bằng fallback`);
-    for (let i = syllabus.length; i < numDays; i++) {
-      const bloom = getBloomLevel(i, numDays);
-      syllabus.push(
-        fallbackPlan[i] || {
-          dayNumber: i + 1,
-          title: `Nội dung ngày ${i + 1}`,
-          objective: `Nắm vững nội dung ${bloom.vi} ngày ${i + 1}.`,
-          bloomLevel: bloom.label,
-          coveredSections: [outline[i % Math.max(outline.length, 1)] || `Phần ${i + 1}`],
-        }
-      );
+    } else {
+      // Trim nếu AI trả về thừa ngày
+      syllabus.length = numDays;
     }
-  } else if (syllabus.length > numDays) {
-    syllabus.length = numDays;
+
+    // Chuẩn hóa lại dayNumber sau khi pad/trim
+    syllabus.forEach((item, i) => { item.dayNumber = i + 1; });
   }
 
-  // Chuẩn hóa dayNumber sau pad/trim
-  syllabus.forEach((item, i) => { item.dayNumber = i + 1; });
-
-  return { title: data.title || fallbackPlan[0]?.title || "Khóa học", syllabus };
+  return { title: data.title, syllabus };
 };
 // ─────────────────────────────────────────────────────────────────────────────
-// 📦 HÀM 2: CẮT NHỏ TÀI LIỆU & LƯU TRỮ VECTOR (processAndStoreDocument)
+// 📦 HÀM 2: CẮT NHỏ TÀI LIỆU & LƯU TRữ VECTOR (processAndStoreDocument)
 //
 // Mục đích: Chuẩn bị dữ liệu cho kỹ thuật RAG (Retrieval-Augmented Generation).
 // Khi AI cần viết bài ngày 3 về SQL Stored Procedure → nó sẽ tìm trong DB
@@ -3740,267 +2325,190 @@ Ví dụ SAI: \`\`\`json{"title":"..."}\`\`\``
 //   - Tài liệu dài hàng ngàn từ KHÔNG thể nhét hết vào 1 lần gọi AI (giới hạn context)
 //   - Cắt nhỏ rồi vít riêng phần cần thiết giúp AI tập trung hơn, chính xác hơn
 // ─────────────────────────────────────────────────────────────────────────────
+// Giới hạn tối đa số chunk để nhúng — tài liệu học thuật dài có thể sinh
+// hàng trăm chunk, gây timeout và tốn quá nhiều API call embedding.
+// Strategy: giữ 60% đầu (intro + nội dung chính) + 40% sampled từ phần còn lại.
+const MAX_EMBED_CHUNKS = 150;
+
+// ✅ FIX: Uniform sampling toàn bộ tài liệu — không ưu tiên phần đầu.
+// Tài liệu học thuật: nội dung cốt lõi thường nằm giữa (chương 2-4),
+// không nhất thiết ở phần đầu. 60/40 split bỏ sót nội dung quan trọng.
+const capChunksForLargeDoc = (allChunks) => {
+  if (allChunks.length <= MAX_EMBED_CHUNKS) return allChunks;
+
+  console.warn(
+    `[Chunk] ⚠️ Tài liệu lớn: ${allChunks.length} chunks → giới hạn còn ${MAX_EMBED_CHUNKS} (uniform sampling).`
+  );
+
+  const step = allChunks.length / MAX_EMBED_CHUNKS;
+  const sampled = Array.from({ length: MAX_EMBED_CHUNKS }, (_, i) =>
+    allChunks[Math.min(Math.round(i * step), allChunks.length - 1)]
+  );
+
+  return sampled;
+};
+
 const processAndStoreDocument = async (planId, text) => {
-  const normalizedText = mergeBrokenNumberedHeadings(String(text || ""));
-  const cleaned = cleanText(normalizedText);
-  const rawChunks = chunkText(cleaned);
+  const cleaned = cleanText(text);
+
+  // ── SMART CHUNKER SELECTION ───────────────────────────────────────
+  // Bước 1: Dùng rule-based chunker trước
+  let rawChunks = chunkText(cleaned);
+
+  // Đánh giá chất lượng cấu trúc tài liệu:
+  // Nếu < 20% chunk có section heading → tài liệu nghèo cấu trúc
+  // (OCR thô, văn xuôi liên tục, không đầu mục)
+  // → dùng AI chunker để cắt semantic tốt hơn
+  const chunksWithSection = rawChunks.filter(c => c.section && c.section.trim().length > 2);
+  const headingDensity = rawChunks.length > 0 ? chunksWithSection.length / rawChunks.length : 1;
+
+  console.log(`[Chunk] heading density: ${(headingDensity * 100).toFixed(0)}% (${chunksWithSection.length}/${rawChunks.length} chunks có section header)`);
+
+  if (headingDensity < 0.20 && rawChunks.length >= 5) {
+    console.log("[Chunk] Cấu trúc tài liệu yếu → thử AI chunker...");
+    try {
+      const aiChunks = await aiChunkText(cleaned);
+      if (aiChunks && aiChunks.length >= rawChunks.length * 0.5) {
+        // AI chunker trả về kết quả hợp lý → dùng
+        rawChunks = aiChunks;
+        console.log(`[Chunk] AI chunker: ${aiChunks.length} chunks (thay thế rule-based)`);
+      } else {
+        console.warn("[Chunk] AI chunker trả về quá ít chunk → giữ rule-based.");
+      }
+    } catch (aiErr) {
+      console.warn("[Chunk] AI chunker lỗi → giữ rule-based:", aiErr.message);
+    }
+  }
 
   if (!rawChunks.length) {
     console.warn("[Chunk] Không có chunk nào.");
     return;
   }
 
-  // ── TOPIC CLASSIFICATION (chạy đồng bộ, không tốn token) ──────
-  const chunks = classifyChunks(rawChunks);
+  // ── TOPIC CLASSIFICATION ─────────────────────────────────
+  const classifiedAll = classifyChunks(rawChunks);
 
-  // Xóa sạch chunks cũ để tránh duplicate
-  await Chunk.deleteMany({ planId });
+  // ── PROPOSITION EXPANSION (granular RAG) ───────────────────
+  // Với mỗi chunk lớn (> 150 từ), sinh thêm các proposition nhỏ
+  // để vector search tìm được sự kiện cụ thể chính xác hơn.
+  // Giới hạn: tối đa 3 propositions/chunk để không tăng quá nhiều DB writes.
+  const MAX_PROPOSITIONS_PER_CHUNK = 3;
+  const PROPOSITION_MIN_WORDS = 6;
 
-  // Bước 1: Chuẩn bị Parent Chunks với _id ổn định để child chunks trỏ đúng parent.
-  const parentDocsToInsert = chunks.map((c, idx) => ({
-    _id: new mongoose.Types.ObjectId(),
-    planId,
-    content: String(c.content || "")
-      .replace(/(<!--\s*image\s*-->\s*\n?){3,}/gi,
-        "*(công thức/hình minh họa — xem tài liệu gốc)*\n")
-      .replace(/(<!--\s*image\s*-->\s*\n?){1,2}/gi, "")
-      .slice(0, 3000),
-    section: sanitizeSectionName(c.section || ""),
-    topic: c.topic || "general",
-    chunkIndex: c.index ?? idx,
-    isChild: false,
-    parentId: null,
-    metadata: {
-      wordCount: c.wordCount || String(c.content || "").split(" ").length,
-    },
-    embedding: []
-  }));
+  const propositionChunks = [];
+  for (const chunk of classifiedAll) {
+    if ((chunk.wordCount || 0) > 150 && typeof splitIntoPropositions === "function") {
+      try {
+        const props = splitIntoPropositions(chunk);
+        const selected = props
+          .filter(p => p.wordCount >= PROPOSITION_MIN_WORDS)
+          .slice(0, MAX_PROPOSITIONS_PER_CHUNK);
 
-  // Bước 2: Tạo Proposition Child Chunks liên kết với các Parent đã có _id.
-  const childDocsToInsert = [];
-  parentDocsToInsert.forEach((parent) => {
-    const propositions = splitIntoPropositions({
-      content: parent.content,
-      section: parent.section
-    });
+        for (const p of selected) {
+          propositionChunks.push({
+            index    : -1, // sẽ re-index sau
+            section  : chunk.section || "",
+            topic    : chunk.topic || "general",
+            content  : p.content,
+            wordCount: p.wordCount,
+            chunkType: "proposition", // nhãn để phân biệt
+          });
+        }
+      } catch (_) { /* bỏ qua nếu lỗi proposition */ }
+    }
+  }
 
-    propositions.forEach((prop) => {
-      childDocsToInsert.push({
-        planId,
-        content: prop.content,
-        section: parent.section,
-        topic: parent.topic,
-        chunkIndex: parent.chunkIndex,
-        isChild: true,
-        parentId: parent._id,
-        metadata: {
-          wordCount: prop.wordCount,
-        },
-        embedding: []
-      });
-    });
-  });
+  // Gộp parent chunks + propositions; re-index
+  const allChunksForEmbed = [...classifiedAll, ...propositionChunks]
+    .map((c, i) => ({ ...c, index: i }));
 
-  // Gộp tất cả Parent và Child Chunks
-  const allDocs = [...parentDocsToInsert, ...childDocsToInsert];
+  console.log(`[Chunk] ${classifiedAll.length} parent chunks + ${propositionChunks.length} propositions = ${allChunksForEmbed.length} total`);
 
-  console.log(`📂 [Parent-Child RAG] Ingestion: ${parentDocsToInsert.length} parent chunks | ${childDocsToInsert.length} child chunks.`);
+  // ── CAP chunks cho tài liệu lớn ──────────────────────────────
+  const chunks = capChunksForLargeDoc(allChunksForEmbed);
 
-  // ──── EMBEDDING (Embedding) ──────────────────────────────────────────────
   const requestedConcurrency = Number(process.env.EMBEDDING_CONCURRENCY || 2);
   const concurrency = Math.max(1, Math.min(3, requestedConcurrency));
 
-  const results = new Array(allDocs.length);
+  console.log(`[Embedding] ${chunks.length}/${rawChunks.length} chunks | concurrency: ${concurrency}`);
+
+  // 🔥 tránh duplicate insert
+  await Chunk.deleteMany({ planId });
+
   let index = 0;
+
+  const results = new Array(chunks.length);
 
   const worker = async () => {
     while (true) {
       const i = index++;
-      if (i >= allDocs.length) break;
+      if (i >= chunks.length) break;
 
-      const doc = allDocs[i];
+      const c = chunks[i];
 
       try {
-        // ✅ FIX: Chỉ stagger khi dùng external embedding API, không stagger local model
-        const isExternalEmbeddingAPI = Boolean(
-          process.env.EMBEDDING_API_URL ||   // URL custom API
-          process.env.VOYAGE_API_KEY ||       // Voyage AI
-          process.env.OPENAI_API_KEY          // OpenAI embeddings
-        );
-        if (i > 0 && isExternalEmbeddingAPI) await sleep(EMBEDDING_STAGGER_MS);
+        // 🔥 tránh rate limit
+        // 800ms đủ để tránh rate-limit với concurrency=2 (~1600ms/req cho từng API slot)
+        if (i > 0) await sleep(800);
+
+        // 🔥 truncate limit lớn hơn để không mất context
+        const safeContent = c.content.slice(0, 3000);
 
         const embedding = await retryWithBackoff(
-          () => generateEmbedding(doc.content, "passage"),
+          () => generateEmbedding(safeContent, "passage"),
           3
         );
 
         if (!embedding || embedding.length === 0) {
+          console.warn(`[Chunk ${i}] embedding null → skip`);
           continue;
         }
 
         results[i] = {
-          ...(doc._id ? { _id: doc._id } : {}),
-          planId: doc.planId,
-          content: doc.content,
+          planId,
+          content: safeContent,
           embedding,
-          chunkIndex: doc.chunkIndex,
-          section: doc.section,
-          topic: doc.topic,
-          isChild: doc.isChild,
-          parentId: doc.parentId,
-          metadata: doc.metadata
+          chunkIndex: c.index ?? i,
+          section: sanitizeSectionName(c.section || ""),
+          topic: c.topic || "general",   // ← lưu topic vào DB
+          metadata: {
+            wordCount: c.wordCount || safeContent.split(" ").length,
+          },
         };
 
       } catch (err) {
-        console.error(`[Embedding Doc ${i}] error:`, err.message);
+        console.error(`[Chunk ${i}] error:`, err.message);
       }
     }
   };
 
-  // chạy workers sinh embedding song song
+  // chạy workers
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, allDocs.length) }, () => worker())
+    Array.from({ length: Math.min(concurrency, chunks.length) }, () => worker())
   );
 
-  const docsToInsert = results.filter(Boolean);
+  // lọc null + giữ order
+  const docs = results.filter(Boolean);
 
-  if (!docsToInsert.length) {
-    console.warn("[Embedding] Không có chunk hợp lệ nào được sinh embedding.");
+  if (!docs.length) {
+    console.warn("[Embedding] Không có chunk hợp lệ.");
     return;
   }
 
-  // Sắp xếp theo thứ tự đọc ban đầu
-  docsToInsert.sort((a, b) => a.chunkIndex - b.chunkIndex);
+  docs.sort((a, b) => a.chunkIndex - b.chunkIndex);
 
-  // Ghi debug chunks ra file để theo dõi nội dung chunk parent/child
-  try {
-    fs.mkdirSync(path.dirname(DEBUG_CHUNKS_PATH), { recursive: true });
-    const debugDocs = docsToInsert.map((doc) => ({
-      _id: doc._id,
-      planId: doc.planId,
-      chunkIndex: doc.chunkIndex,
-      section: doc.section,
-      topic: doc.topic,
-      isChild: doc.isChild,
-      parentId: doc.parentId,
-      wordCount: doc.metadata?.wordCount || 0,
-      contentSnippet: String(doc.content || "").slice(0, 1200),
-    }));
-    fs.writeFileSync(
-      DEBUG_CHUNKS_PATH,
-      JSON.stringify({ generatedAt: new Date().toISOString(), count: debugDocs.length, chunks: debugDocs }, null, 2),
-      "utf-8"
-    );
-    console.log(`🧪 Debug saved: ${path.basename(DEBUG_CHUNKS_PATH)}`);
-  } catch (err) {
-    console.warn("⚠️ Không thể lưu debug chunk:", err.message);
-  }
-
-  // 🔥 insert theo batch
+  // 🔥 insert theo batch (an toàn DB)
   const BATCH_SIZE = 50;
-  for (let i = 0; i < docsToInsert.length; i += BATCH_SIZE) {
-    const batch = docsToInsert.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+    const batch = docs.slice(i, i + BATCH_SIZE);
     try {
       await Chunk.insertMany(batch, { ordered: false });
     } catch (err) {
-      console.error("[DB] Batch insert parent-child chunks lỗi:", err.message);
+      console.error("[DB] Batch insert lỗi:", err.message);
     }
   }
 
-  console.log(`[Embedding] Đã lưu thành công ${docsToInsert.length} chunks (gồm cả Parent và Child).`);
-};
-
-/**
- * 🔥 Fix 1: Coverage-Aware Retrieval - Nạp thêm các parent chunks kế cận (chunkIndex + 1, chunkIndex + 2)
- * để đảm bảo tính liên kết kiến thức, không bỏ sót các phần liền sau (ví dụ break/continue sau for/while).
- */const expandChunksWithNeighbors = async (planId, chunks, expandCount = 2) => {
-  if (!chunks || chunks.length === 0) return [];
-
-  const expanded = [...chunks];
-  const existingIndexes = new Set();
-  const neighborIndexes = new Set();
-
-  for (const chunk of chunks) {
-    if (chunk.chunkIndex !== undefined && !chunk.isChild) {
-      existingIndexes.add(chunk.chunkIndex);
-    }
-  }
-
-  // Build map chunkIndex → major chapter
-  const indexToChapter = new Map();
-  for (const chunk of chunks) {
-    if (chunk.isChild || chunk.chunkIndex === undefined) continue;
-    const sec = String(chunk.section || "");
-    const majorChapter = (sec.match(/^(\d+)\./) || [])[1] || null;
-    if (majorChapter) {
-      indexToChapter.set(chunk.chunkIndex, majorChapter);
-    }
-  }
-
-  // ✅ FIX bổ sung: Tập tất cả chapter đang dạy (dùng cho fallback khi chunk gốc không có section)
-  const activeChapters = new Set(
-    [...indexToChapter.values()].filter(Boolean)
-  );
-
-  for (const chunk of chunks) {
-    if (chunk.isChild) continue;
-    if (chunk.chunkIndex === undefined) continue;
-    const chunkChapter = indexToChapter.get(chunk.chunkIndex) || null;
-
-    for (let i = 1; i <= expandCount; i++) {
-      const after = chunk.chunkIndex + i;
-      const before = chunk.chunkIndex - i;
-
-      if (!existingIndexes.has(after)) neighborIndexes.add({ idx: after, chapter: chunkChapter });
-      if (before >= 0 && !existingIndexes.has(before)) neighborIndexes.add({ idx: before, chapter: chunkChapter });
-    }
-  }
-
-  if (neighborIndexes.size > 0) {
-    const neighborIdxList = [...neighborIndexes].map(n => n.idx);
-    const idxToChapter = new Map([...neighborIndexes].map(n => [n.idx, n.chapter]));
-
-    const neighbors = await Chunk.find({
-      planId,
-      chunkIndex: { $in: neighborIdxList },
-      isChild: false
-    }).lean();
-
-    for (const neighbor of neighbors) {
-      if (existingIndexes.has(neighbor.chunkIndex)) continue;
-
-      const requiredChapter = idxToChapter.get(neighbor.chunkIndex);
-      const neighborSec = String(neighbor.section || "");
-      const neighborChapter = (neighborSec.match(/^(\d+)\./) || [])[1] || null;
-
-      if (requiredChapter !== null) {
-        // ✅ Chunk gốc có section → kiểm tra chapter khớp
-        if (neighborChapter && neighborChapter !== requiredChapter) {
-          console.log(
-            `[ExpandGuard] Bỏ qua neighbor idx=${neighbor.chunkIndex} ` +
-            `(chương ${neighborChapter} ≠ yêu cầu ${requiredChapter})`
-          );
-          continue;
-        }
-      } else if (activeChapters.size > 0) {
-        // ✅ FIX bổ sung: Chunk gốc không có section nhưng tài liệu CÓ đánh số chapter
-        // → dùng activeChapters làm boundary
-        if (neighborChapter && !activeChapters.has(neighborChapter)) {
-          console.log(
-            `[ExpandGuard] Bỏ qua neighbor idx=${neighbor.chunkIndex} ` +
-            `(chương ${neighborChapter} ngoài tập đang dạy: ${[...activeChapters].join(",")})`
-          );
-          continue;
-        }
-      }
-      // Tài liệu không đánh số (activeChapters rỗng) → thêm tự do
-
-      expanded.push(neighbor);
-      existingIndexes.add(neighbor.chunkIndex);
-    }
-  }
-
-  return expanded.sort((a, b) => a.chunkIndex - b.chunkIndex);
+  console.log(`[Embedding] Đã lưu ${docs.length}/${chunks.length} chunks.`);
 };
 // ─────────────────────────────────────────────────────────────────────────────
 // 🧠 HÀM 3: SINH BÀI GIẢNG CHI TIẾT BẰỚC RAG (generateScientificLesson)
@@ -4016,7 +2524,7 @@ const processAndStoreDocument = async (planId, text) => {
 //   - usedConcepts   : Khái niệm đã dạy (đưa vào prompt nhắc AI không giải thích lại)
 //
 // Chuỗi xử lý bên trong:
-//   B1: Xác định Persona từ profile.depth (basic → rõ ràng dễ hiểu / deep → phân tích sâu)
+//   B1: getLearningMode()    - Xác định học viên đang ở trình độ nào (remedial/normal/advanced)
 //   B2: generateHyDE()      - Tạo đoạn văn giả định để tìm kiếm vector chính xác hơn
 //   B3: searchChunksBySection() / searchRelevantChunks() - Tìm các chunk tài liệu phù hợp nhất
 //   B4: selectDiverseChunks() - Chọn đa dạng, tránh chọn các chunk quá giống nhau
@@ -4045,13 +2553,15 @@ const generateScientificLesson = async (
       item.bloomLevel ||
       getBloomLevel((item.day || 1) - 1, totalDays).label;
 
-    // Persona dựa trên profile.depth từ form UI (basic / deep)
-    // Không còn dùng getLearningMode vì UI mới không có REMEDIAL/NORMAL/ADVANCED
+    const mode = userId ? await getLearningMode(userId, topic) : "NORMAL";
+
     const personaMap = {
-      basic: "Giảng dạy rõ ràng, ngôn ngữ dễ hiểu, mỗi đoạn tập trung một ý chính.",
-      deep: "Phân tích sâu, liên hệ giữa các khái niệm, nêu cạm bẫy thường gặp và edge cases.",
+      REMEDIAL: "Giải thích đơn giản, nhiều ví dụ đời thường.",
+      NORMAL: "Giảng dạy chuẩn, logic rõ ràng.",
+      ADVANCED: "Phân tích sâu, kỹ thuật, có edge cases.",
     };
-    const selectedPersona = personaMap[profile.depth] || personaMap.basic;
+
+    const selectedPersona = personaMap[mode] || personaMap.NORMAL;
 
     const bloomDepthMap = {
       Remember: "Định nghĩa và ghi nhớ.",
@@ -4069,14 +2579,20 @@ const generateScientificLesson = async (
       topic.includes(" - ") ? topic.split(" - ").pop() : topic;
 
     // ─────────────────────────────
-    // RAG PIPELINE — ưu tiên section search (không cần HyDE khi có coveredSections)
+    // RAG PIPELINE (SAFE MODE)
     // ─────────────────────────────
 
-    const coveredSectionsList = item.coveredSections || [];
-    // ─────────────────────────────
-    // RAG PIPELINE
-    // ─────────────────────────────
     let queryVector = null;
+
+    try {
+      const hydePassage = await generateHyDE(searchTopic, objective);
+      queryVector = await generateEmbedding(`passage: ${hydePassage}`, "query");
+    } catch (err) {
+      console.warn("[RAG] HyDE failed → fallback:", err.message);
+    }
+
+    const coveredSectionsList = item.coveredSections || [];
+
     let contextChunks = [];
 
     try {
@@ -4084,119 +2600,46 @@ const generateScientificLesson = async (
         contextChunks = await searchChunksBySection(
           planId,
           coveredSectionsList,
-          null,
-          CHUNK_SEARCH_K,
-          6000
+          queryVector,
+          CHUNK_SEARCH_K
         );
       }
 
-      if (!contextChunks.length && coveredSectionsList.length > 0) {
-        console.warn("[RAG] Section filter rỗng → multi-query fallback theo từng section");
-        const sectionChunks = [];
-        for (const section of coveredSectionsList.slice(0, 4)) {
-          try {
-            const sectionVec = await generateEmbedding(`passage: ${section}`, "query");
-            const hits = await searchRelevantChunks(planId, sectionVec, 3);
-            sectionChunks.push(...hits);
-          } catch (e) { /* skip */ }
-        }
-        const seen = new Set();
-        const dedupedChildren = sectionChunks.filter(c => {
-          if (seen.has(c.chunkIndex)) return false;
-          seen.add(c.chunkIndex);
-          return true;
-        });
-        contextChunks = await expandToParentChunks(planId, dedupedChildren);
+      // fallback nếu section fail hoặc rỗng
+      if (!contextChunks.length) {
+        console.warn("[RAG] fallback → vector search");
+        contextChunks = await searchRelevantChunks(
+          planId,
+          queryVector,
+          CHUNK_SEARCH_K
+        );
       }
 
-      if (!contextChunks.length) {
-        try {
-          const queryText = `${searchTopic}. ${objective || ""}`;
-          queryVector = await generateEmbedding(`passage: ${queryText}`, "query");
-        } catch (err) {
-          console.warn("[RAG] embedding failed:", err.message);
-        }
-        console.warn("[RAG] fallback → vector search toàn cục");
-        const raw = await searchRelevantChunks(planId, queryVector, CHUNK_SEARCH_K);
-        contextChunks = await expandToParentChunks(planId, raw);
-      }
     } catch (err) {
       console.error("[RAG] search failed:", err.message);
     }
 
-    // ✅ FIX: expand neighbors TRƯỚC, filter section SAU
-    // Lý do: filterChunksByCoveredSections loại chunk không khớp section,
-    // nhưng neighbor hợp lệ (cùng chương) cũng bị loại oan nếu filter chạy trước.
-    contextChunks = await expandChunksWithNeighbors(planId, contextChunks, 2);
-    contextChunks = filterChunksByCoveredSections(contextChunks, coveredSectionsList);
-
     // ─────────────────────────────
     // CHUNK FILTER + DEDUP
     // ─────────────────────────────
-    let selectedChunks;
 
-    if (coveredSectionsList.length > 0) {
-      // ✅ FIX: filter scope TRƯỚC, expand parent SAU
-      // Lý do: expandToParentChunks có thể kéo parent ngoài coveredSections vào
-      const filteredFirst = filterChunksByCoveredSections(contextChunks, coveredSectionsList);
+    let scoredChunks = filterChunksByScore(
+      contextChunks,
+      CHUNK_SCORE_THRESHOLD,
+      2
+    );
 
-      // Bước 1: expand child → parent (trên tập đã lọc scope)
-      const parentChunks = await expandToParentChunks(planId, filteredFirst);
+    let selectedChunks = selectDiverseChunks(
+      scoredChunks,
+      usedChunkSignatures,
+      CHUNK_USE_K
+    );
 
-      // Bước 2: filter scope lần 2 — loại parent ngoài scope bị kéo vào qua expandToParentChunks
-      const scopedParents = filterChunksByCoveredSections(parentChunks, coveredSectionsList);
-
-      // Bước 3: lọc chunk quá ngắn + đã dùng
-      selectedChunks = scopedParents
-        .filter(c => {
-          const sig = getChunkSignature(c.content);
-          if (usedChunkSignatures.includes(sig)) return false;
-          if (String(c.content || '').trim().length < 80) return false;
-          return true;
-        })
-        .slice(0, CHUNK_USE_K);
-
-      // Fallback nhẹ: bỏ filter usedChunk
-      if (!selectedChunks.length) {
-        selectedChunks = filterOutTocChunks(scopedParents)
-          .filter(c => String(c.content || '').trim().length >= 80)
-          .slice(0, CHUNK_USE_K);
-      }
-
-      if (!selectedChunks.length) {
-        selectedChunks = filterOutTocChunks(scopedParents).slice(0, CHUNK_USE_K);
-      }
-    } else {
-      const parentChunks = await expandToParentChunks(planId, contextChunks);
-
-      const scoredChunks = filterChunksByScore(parentChunks, CHUNK_SCORE_THRESHOLD, 2);
-      selectedChunks = selectDiverseChunks(scoredChunks, usedChunkSignatures, CHUNK_USE_K);
-
-      if (!selectedChunks.length && parentChunks.length > 0) {
-        selectedChunks = filterOutTocChunks(parentChunks).slice(0, 2);
-      }
+    // fallback nếu không có chunk tốt
+    if (!selectedChunks.length && contextChunks.length > 0) {
+      selectedChunks = contextChunks.slice(0, 2);
     }
 
-    // Fallback khẩn cấp: vẫn rỗng sau tất cả
-    if (!selectedChunks || selectedChunks.length === 0) {
-      console.warn(`[RAG Fallback] Vẫn rỗng → vector search khẩn cấp`);
-      try {
-        if (!queryVector) {
-          const queryText = `${searchTopic}. ${objective || ""}`;
-          queryVector = await generateEmbedding(`passage: ${queryText}`, "query");
-        }
-        const fallbackRaw = await searchRelevantChunks(planId, queryVector, 5);
-        const fallbackParents = await expandToParentChunks(planId, fallbackRaw);
-        selectedChunks = filterOutTocChunks(fallbackParents)
-          .filter(c => String(c.content || '').trim().length >= 80)
-          .slice(0, 3);
-        if (!selectedChunks.length && fallbackParents.length > 0) {
-          selectedChunks = filterOutTocChunks(fallbackParents).slice(0, 2);
-        }
-      } catch (err) {
-        console.error("[RAG Fallback] Lỗi tìm kiếm khẩn cấp:", err.message);
-      }
-    }
     const currentChunkSigs = selectedChunks.map((c) =>
       getChunkSignature(c.content)
     );
@@ -4205,41 +2648,25 @@ const generateScientificLesson = async (
     // CONTEXT BUILD (SAFE)
     // ─────────────────────────────
 
-    let context = selectedChunks.length
-      ? fixOcrGluedWords(selectedChunks.map((c) => c.content).join("\n---\n"))
-      : "Không có context.";
-
-    context = smartTruncateContext(context, 6500, 600);
-
-    // ✅ CHỐNG MẤT HÌNH/CÔNG THỨC: thay marker bằng placeholder văn bản dễ nhận diện
-    context = context
-      .replace(/(<!--\s*image\s*-->\s*\n?){2,}/gi,
-        "*(Tài liệu gốc có hình minh họa/công thức tại đây — không có văn bản thay thế)*\n")
-      .replace(/<!--\s*image\s*-->/gi,
-        "*(hình minh họa)*");
-
-    // ✅ CHỐNG HALLUCINATION: cảnh báo khi context quá nghèo nàn
-    const contextIsEmpty = !selectedChunks.length;
-    const contextIsThin = selectedChunks.length > 0 && context.replace(/\s/g, "").length < 300;
-    if (contextIsEmpty) {
-      console.warn(`[Anti-Hallucination] Day ${dayNumber}: context RỖNG — AI có thể hallucinate. Kiểm tra lại chunks cho planId=${planId}`);
-      context = `[CẢNH BÁO: Tài liệu gốc không có đủ nội dung cho chủ đề này. Chỉ trình bày những gì bạn biết chắc chắn từ context bên dưới, KHÔNG được bịa thêm.]
-
-Không có context.`;
-    } else if (contextIsThin) {
-      console.warn(`[Anti-Hallucination] Day ${dayNumber}: context RẤT NGẮN (${context.replace(/\s/g, '').length} ký tự) — tăng cảnh giác hallucination`);
-      context = `[CẢNH BÁO: Nội dung tài liệu gốc cho phần này rất hạn chế. Chỉ giảng dạy dựa trên các thông tin dưới đây, KHÔNG mở rộng bằng kiến thức ngoài tài liệu.]
-
-${context}`;
+    let context = "Không có context.";
+    if (selectedChunks.length) {
+      // ✅ FIX: sort theo chứ tự gốc tài liệu (chunkIndex) để AI đọc context theo đúng flow kiến thức
+      const ordered = [...selectedChunks].sort((a, b) => {
+        const ai = a.chunkIndex ?? a.index ?? 9999;
+        const bi = b.chunkIndex ?? b.index ?? 9999;
+        return ai - bi;
+      });
+      context = ordered.map((c) => c.content).join("\n---\n");
     }
-    // ✅ Lọc formulaNotes theo scope của ngày học (tránh lấn sân nội dung ngày khác)
-    const coveredSections = item?.coveredSections || [];
-    const formulaNotesFromContext = filterNotesByScope(
-      extractFormulaLikeNotes(context),
-      coveredSections
-    );
 
-    const codeIdentifiersFromContext = extractContextTerms(context);
+    // ✅ FIX: tăng limit để không cắt mất ví dụ code dài
+    context = context.slice(0, 7500);
+
+    const formulaNotesFromContext =
+      extractFormulaLikeNotes(context);
+
+    // ✅ FIX #2: Trích xuất tên SP/bảng/biến từ context để nhắc AI dùng đúng
+    const codeIdentifiersFromContext = extractCodeIdentifiers(context);
 
     // ✅ FIX: Trích xuất các sự kiện/phân loại quan trọng để AI không bỏ sót
     const keyFactsFromContext = extractKeyFacts(context);
@@ -4265,71 +2692,46 @@ ${context}`;
       usedConcepts: usedConcepts || [],  // ← concept memory
     });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ⚡ LAZY QUIZ: Bỏ qua Phase 2 (quiz) khi tạo khóa học
-    // Quiz sẽ được tạo ON-DEMAND khi học viên lần đầu mở bài học.
-    // Mục đích: Giảm 40-50% thời gian tạo khóa học.
-    // ─────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────
+    // PHASE 2: META (SAFE)
+    // ─────────────────────────────
 
-    // ── POST-PROCESS: Loại bỏ nội dung AI viết sai scope ─────────────────
-    // Ví dụ: AI tự thêm "### 2.3 Giao dịch" vào bài ngày 1 dù không được phép
-    //let scopedContent = stripOutOfScopeHeadings(lessonContent, coveredSectionsList);
+    let metaData = { importantNotes: [], summary: "", quiz: [] };
 
-    // Bỏ Fact Verification Pass theo yêu cầu của học viên
-    // Sau khi có lessonContent, thêm lại verify nhưng chỉ chạy khi content ngắn bất thường
-    const MIN_CONTENT_LENGTH = 800;
-    let scopedContent = stripOutOfScopeHeadings(lessonContent, coveredSectionsList);
-
-    // Bỏ qua verify nếu Phase1 fail và trả về fallback string
-    const isPhase1Fallback = scopedContent.includes("Nội dung đang được cập nhật từ tài liệu gốc");
-
-    if (!isPhase1Fallback) {
-      // Fix 1: verify dựa trên tỉ lệ content/context
-      const contextWordCount = String(context || "").replace(/\s+/g, " ").split(" ").length;
-      const contentWordCount = scopedContent.replace(/\s+/g, " ").split(" ").length;
-      const expansionRatio = contentWordCount / Math.max(contextWordCount, 1);
-
-      const shouldVerify =
-        expansionRatio > 1.8          // content phình to bất thường → nghi hallucinate
-        && contextWordCount > 150     // context đủ dày để AI verify có cơ sở đối chiếu
-        && coveredSectionsList.length > 0 // chỉ verify khi có danh sách section rõ ràng
-        && !contextIsThin;            // context mỏng → verify vô nghĩa, bỏ qua
-
-      if (shouldVerify) {
-        console.warn(
-          `[Verify] Chạy verify: ratio=${expansionRatio.toFixed(2)}, ` +
-          `contextWords=${contextWordCount}, contentWords=${contentWordCount}`
-        );
-        try {
-          const verified = await verifyLessonContent(
-            scopedContent,
-            context,
-            MODEL_FAST,
-            coveredSectionsList
-          );
-          if (verified.correctedContent && verified.correctedContent.length > 100) {
-            scopedContent = verified.correctedContent;
-            if (verified.hallucinations?.length > 0) {
-              console.warn(`[Verify] Phát hiện ${verified.hallucinations.length} chỗ sai:`, verified.hallucinations);
-            }
-          }
-        } catch (e) {
-          console.warn("[Verify] Skipped:", e.message);
-        }
+    try {
+      if (typeof generateLessonMeta === "function") {
+        const metaRaw = await retryWithBackoff(() => generateLessonMeta({
+          context,
+          searchTopic,
+          objective,
+          bloomLevel,
+          quizBounds,
+          profile,
+          formulaNotes: formulaNotesFromContext,
+          totalDays,
+        }));
+        const parsed = safeJSONParse(metaRaw);
+        if (parsed) metaData = { ...metaData, ...parsed };
+      } else {
+        console.warn("[Meta] generateLessonMeta is not defined, skipping");
       }
-    } else {
-      console.warn(`[Verify] Bỏ qua verify vì Phase1 trả về fallback string`);
+    } catch (err) {
+      console.warn("[Meta] failed:", err.message);
     }
-    // Tạo summary nhanh từ chính content (không gọi AI thêm)
-    const quickSummary = objective || `Bài học về ${searchTopic}`;
-    const importantNotes = extractNotesFromMarkdown(scopedContent);
-    // Chuẩn hóa nội dung bài học (không có quiz)
-    const data = normalizeLessonData(
+
+    // ─────────────────────────────
+    // NORMALIZE
+    // ─────────────────────────────
+
+    let data = normalizeLessonData(
       {
-        content: scopedContent,   // ← dùng scopedContent đã kiểm duyệt
-        importantNotes,   // Sẽ được sinh khi tạo quiz on-demand
-        summary: quickSummary,
-        quiz: [],             // Rỗng — sẽ được sinh khi học viên mở bài lần đầu
+        content: lessonContent,
+        importantNotes: metaData.importantNotes || [],
+        summary:
+          metaData.summary ||
+          objective ||
+          `Bài học về ${searchTopic}`,
+        quiz: metaData.quiz || [],
       },
       objective,
       formulaNotesFromContext,
@@ -4338,6 +2740,37 @@ ${context}`;
       practiceBias,
       { allowHeuristicFallback: false }
     );
+
+    // ─────────────────────────────
+    // QUIZ PIPELINE (SAFE)
+    // ─────────────────────────────
+
+    try {
+      data.quiz = await runQuizPipeline({
+        existingQuiz: data.quiz,
+        context,
+        searchTopic,
+        objective,
+        profile,
+        quizBounds,
+        formulaNotes: formulaNotesFromContext,
+      });
+    } catch (err) {
+      console.warn("[Quiz] pipeline failed:", err.message);
+    }
+
+    // fallback nếu thiếu quiz
+    if (!data.quiz || data.quiz.length < quizBounds.min) {
+      data = normalizeLessonData(
+        { ...data },
+        objective,
+        formulaNotesFromContext,
+        searchTopic,
+        quizBounds,
+        practiceBias,
+        { allowHeuristicFallback: true }
+      );
+    }
 
     data.usedChunkSignatures = currentChunkSigs;
 
@@ -4359,175 +2792,6 @@ ${context}`;
       newConcepts: [],
     };
   }
-};
-
-
-
-
-const expandToParentChunks = async (planId, chunks) => {
-  if (!chunks || chunks.length === 0) return [];
-
-  // Tách ra: chunk nào đã là parent, chunk nào là child cần lookup parent
-  const parentChunks = chunks.filter(c => !c.isChild);
-  const childChunks = chunks.filter(c => c.isChild && c.parentId);
-
-  if (childChunks.length === 0) return parentChunks;
-
-  // Lấy tất cả parentId duy nhất từ child chunks
-  const parentIds = [...new Set(childChunks.map(c => String(c.parentId)))];
-
-  const parents = await Chunk.find({
-    _id: { $in: parentIds },
-    planId,
-    isChild: false
-  }).lean();
-
-  // Merge + dedup theo _id
-  const seen = new Set(parentChunks.map(c => String(c._id)));
-  for (const p of parents) {
-    if (!seen.has(String(p._id))) {
-      parentChunks.push(p);
-      seen.add(String(p._id));
-    }
-  }
-
-  return parentChunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
-};
-// ─────────────────────────────────────────────────────────────────────────────
-// ⚡ HÀM ON-DEMAND: SINH QUIZ KHI HỌC VIÊN MỞ BÀI HỌC (generateQuizForLesson)
-//
-// Mục đích: Được gọi từ Controller khi học viên lần đầu mở một bài học.
-//           Sinh quiz + importantNotes từ nội dung bài học đã có sẵn.
-//
-// Tham số:
-//   - lesson       : Document Lesson từ MongoDB (có lesson.content, lesson.title)
-//   - learningGoals: Mục tiêu học {focus, depth} của học viên
-// Trả về:
-//   { quiz: [...], importantNotes: [...], summary: "..." }
-// ─────────────────────────────────────────────────────────────────────────────
-const generateQuizForLesson = async (lesson, learningGoals = {}) => {
-  const profile = normalizeLearningGoals(learningGoals);
-  const quizBounds = getQuizBounds(profile);
-  const practiceBias = profile.focus === "practice";
-
-  const searchTopic = lesson.title || "Bài học";
-  const objective = lesson.summary || "";
-  // Dùng chính content bài học làm context để tạo quiz — không cần RAG lại
-  const context = String(lesson.content || "").slice(0, 6000);
-
-  // Lọc theo coveredSections nếu có (nhất quán với generateScientificLesson)
-  const coveredSections = lesson.coveredSections || [];
-  const formulaNotes = filterNotesByScope(
-    extractFormulaLikeNotes(context),
-    coveredSections
-  );
-
-  let metaData = { importantNotes: [], summary: objective, quiz: [] };
-
-  // Gọi AI sinh quiz + importantNotes
-  try {
-    if (typeof generateLessonMeta === "function") {
-      const metaRaw = await retryWithBackoff(() => generateLessonMeta({
-        context,
-        searchTopic,
-        objective,
-        bloomLevel: lesson.bloomLevel || "Understand",
-        quizBounds,
-        profile,
-        formulaNotes,
-        totalDays: 1,  // không cần context toàn khóa
-      }));
-      const parsed = safeJSONParse(metaRaw);
-      if (parsed) metaData = { ...metaData, ...parsed };
-    }
-  } catch (err) {
-    console.warn("[OnDemandQuiz] generateLessonMeta failed:", err.message);
-  }
-
-  // Chuẩn hóa + chạy quiz pipeline
-  let data = normalizeLessonData(
-    {
-      content: context,
-      importantNotes: metaData.importantNotes || [],
-      summary: metaData.summary || objective,
-      quiz: metaData.quiz || [],
-    },
-    objective, formulaNotes, searchTopic, quizBounds, practiceBias,
-    { allowHeuristicFallback: false }
-  );
-
-  try {
-    data.quiz = await runQuizPipeline({
-      existingQuiz: data.quiz,
-      context,
-      searchTopic,
-      objective,
-      profile,
-      quizBounds,
-      formulaNotes,
-    });
-  } catch (err) {
-    console.warn("[OnDemandQuiz] pipeline failed:", err.message);
-  }
-
-  // Fallback nếu vẫn thiếu quiz
-  if (!data.quiz || data.quiz.length < quizBounds.min) {
-    data = normalizeLessonData(
-      { ...data },
-      objective, formulaNotes, searchTopic, quizBounds, practiceBias,
-      { allowHeuristicFallback: true }
-    );
-  }
-
-  return {
-    quiz: data.quiz || [],
-    importantNotes: data.importantNotes || [],
-    summary: data.summary || objective,
-  };
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// EXTRACT TITLE FROM TEXT — domain-agnostic fallback
-// Tr\u00edch ti\u00eau \u0111\u1ec1 kh\u00f3a h\u1ecdc t\u1eeb n\u1ed9i dung t\u00e0i li\u1ec7u khi AI fail.
-// Th\u1eed theo th\u1ee9 t\u1ef1: (1) heading ## \u0111\u1ea7u ti\u00ean, (2) d\u00f2ng ch\u1eef in hoa, (3) c\u00e2u \u0111\u1ea7u ti\u00ean
-// ─────────────────────────────────────────────────────────────────────────────
-const extractTitleFromText = (text) => {
-  if (!text || typeof text !== 'string') return '';
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-
-  // 1. Markdown heading cấp 1
-  for (const line of lines.slice(0, 30)) {
-    const h1 = line.match(/^#\s+(.{4,80})/);
-    if (h1) return h1[1].replace(/[*_`]/g, '').trim();
-  }
-
-  // 2. Markdown heading cấp 2
-  for (const line of lines.slice(0, 30)) {
-    const h2 = line.match(/^##\s+(.{4,80})/);
-    if (h2) return h2[1].replace(/[*_`]/g, '').trim();
-  }
-
-  // 3. Dòng ALLCAPS (tiêu đề slide / giáo trình không dùng markdown)
-  for (const line of lines.slice(0, 20)) {
-    if (line.length >= 5 && line.length <= 80 &&
-      line === line.toUpperCase() &&
-      /[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐƠƯ]{3,}/.test(line) &&
-      !/[{}()[\];=<>]/.test(line)) {
-      return line.slice(0, 70);
-    }
-  }
-
-  // 4. Numbered section đầu tiên "1. Tiêu đề" hoặc "1 Tiêu đề"
-  for (const line of lines.slice(0, 20)) {
-    const num = line.match(/^(?:1|I)[.)]\s+(.{4,80})/);
-    if (num) return num[1].trim().slice(0, 70);
-  }
-
-  // 5. Câu đầu tiên có đủ độ dài
-  const firstLong = lines.find(l => l.length >= 10 && l.length <= 100 &&
-    /[A-Za-zÀ-ỹ]{3,}/.test(l));
-  return firstLong ? firstLong.slice(0, 70) : '';
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4553,11 +2817,11 @@ const extractTitleFromText = (text) => {
 //    Không phải toàn bộ — đủ để ước lượng nhưng không tốn quá nhiều token AI.
 // ─────────────────────────────────────────────────────────────────────────────
 const analyzeDocument = async (text, rawLearningGoals = {}, userDays = 7, fileMetadata = null) => {
-  const learningGoals = normalizeLearningGoals(rawLearningGoals);//chuẩn hoá mục tiêu học
-  const wordCount = text.split(/\s+/).length;//đếm số từ trong file 
+  const learningGoals = normalizeLearningGoals(rawLearningGoals);
+  const wordCount = text.split(/\s+/).length;
 
-  let requestedDays = parseInt(userDays) || 7;//số ngày học yêu cầu từ người dùng
-  const finalDaysMaster = Math.min(DAYS_MAX, Math.max(DAYS_MIN, requestedDays));//số ngày học cuối cùng (tối thiểu 1, tối đa 14)
+  let requestedDays = parseInt(userDays) || 7;
+  const finalDaysMaster = Math.min(DAYS_MAX, Math.max(DAYS_MIN, requestedDays));
 
   const metaContext = fileMetadata
     ? `THONG TIN: So tu: ${fileMetadata.wordCount}. Bang bieu: ${fileMetadata.tableCount > 0 ? fileMetadata.tableCount : "Khong"}. Cong thuc: ${fileMetadata.hasFormulas ? "Co" : "Khong"}. Do phuc tap: ${fileMetadata.estimatedComplexity}.`
@@ -4568,54 +2832,65 @@ const analyzeDocument = async (text, rawLearningGoals = {}, userDays = 7, fileMe
 BOI CANH NGUOI HOC:
 ${analyzeContextBlock(learningGoals)}
 
-QUY TAC:
-- suggestedTitle: Ten khoa hoc ngan gon, ro rang (toi da 10 tu)
-- summary: 1-2 cau mo ta noi dung chinh, KHONG chung chung
+QUY TAC BAT BUOC:
+- suggestedDays PHAI = ${finalDaysMaster}
+- difficulty CHI DUOC: Easy | Medium | Hard
+- summary: 1-2 cau, khong chung chung
 
-{"suggestedTitle":"...","summary":"..."}`;
+{"suggestedTitle":"...","difficulty":"Medium","suggestedDays":${finalDaysMaster},"summary":"..."}`;
 
   let analysis = {};
 
   try {
     const response = await makeGroqRequest({
       messages: [
-        { role: "system", content: "Chi tra ve JSON hop le. KHONG giai thich, KHONG markdown." },
+        { role: "system", content: "Chi tra ve JSON hop le." },
         { role: "user", content: prompt + "\n\nTEXT:\n" + text.substring(0, MAX_ANALYZE_TEXT) }
       ],
       model: MODEL_FAST,
       temperature: 0.1,
-      maxTokens: 300,   // Chỉ cần 2 trường → giảm từ 600 xuống 300
+      maxTokens: 600,
       enforceJSON: true,
     });
 
     analysis = safeJSONParse(response) || {};
 
   } catch (err) {
-    console.warn("[analyzeDocument] safeJSONParse failed, thử extract thủ công:", err.message);
-    // Extract thủ công từ prose nếu AI trả về text thay vì JSON
-    try {
-      const titleMatch = String(response || "").match(/"suggestedTitle"\s*:\s*"([^"]{3,80})"/);
-      const summaryMatch = String(response || "").match(/"summary"\s*:\s*"([^"]{10,300})"/);
-      if (titleMatch || summaryMatch) {
-        analysis = {
-          suggestedTitle: titleMatch?.[1] || "",
-          summary: summaryMatch?.[1] || "",
-        };
-      }
-    } catch (_) { }
+    console.warn("[analyzeDocument] AI failed, fallback:", err.message);
+    analysis = {};
   }
 
   // ─────────────────────────────
-  // FIX-1: VALIDATION + FALLBACK
+  // FIX-1: HARD VALIDATION + FALLBACK
   // ─────────────────────────────
-  // ⚠️ Đã bỏ normalizeDifficulty + difficulty: UI mới không cần.
+
+  const normalizeDifficulty = (d) => {
+    if (!d) return null;
+    const val = String(d).toLowerCase();
+    if (val.includes("easy")) return "Easy";
+    if (val.includes("hard")) return "Hard";
+    return "Medium";
+  };
 
   let suggestedTitle = normalizeSpace(analysis.suggestedTitle || "");
+  let difficulty = normalizeDifficulty(analysis.difficulty);
   let summary = normalizeSpace(analysis.summary || "");
 
   // Fix title nếu rỗng / generic
   if (!suggestedTitle || suggestedTitle.length < 5) {
     suggestedTitle = extractTitleFromText(text) || "Lo trinh hoc tu tai lieu";
+  }
+
+  // Fix difficulty nếu thiếu
+  if (!difficulty) {
+    difficulty =
+      learningGoals.depth === "deep"
+        ? "Hard"
+        : wordCount > 4000
+          ? "Hard"
+          : wordCount < 1200
+            ? "Easy"
+            : "Medium";
   }
 
   // Fix summary nếu generic
@@ -4627,9 +2902,10 @@ QUY TAC:
     summary = `Tai lieu tap trung vao cac noi dung chinh cua "${suggestedTitle}", duoc chia thanh ${finalDaysMaster} ngay hoc theo lo trinh logic.`;
   }
 
-  // Trả về chỉ những trường UI cần (đã bỏ difficulty, suggestedDays)
   const finalAnalysis = {
     suggestedTitle,
+    difficulty,
+    suggestedDays: finalDaysMaster,
     summary,
     learningGoals,
   };
@@ -4698,7 +2974,6 @@ module.exports = {
   generateSyllabus,
   processAndStoreDocument,
   generateScientificLesson,
-  generateQuizForLesson,    // ← Hàm on-demand: sinh quiz khi học viên mở bài
   analyzeDocument,
   safeJSONParse,
   retryWithBackoff,
@@ -4714,7 +2989,4 @@ module.exports = {
   validateScopeCompliance,
   checkContentDuplication,
   filterChunksByScore,
-  verifyLessonContent,      // Export để kiểm thử và gọi từ các scripts kiểm duyệt bài học
-  postProcessChunkWithLLM,  // Export để xử lý làm sạch chunk
-  checkTextQualityNeedsLLM,  // Export để kiểm tra chất lượng text
 };

@@ -55,6 +55,7 @@ const CHUNK_CACHE_MAX = 200;
 const _getContextChunks = async (planId, queryEmbedding, topK = 5) => {
   if (!planId) return [];
 
+  // Key gọn: planId + 8 giá trị đầu của embedding (float → 2 chữ số)
   const embKey = queryEmbedding.slice(0, 20).map(v => v.toFixed(4)).join(",");
   const cacheKey = `${planId}:${embKey}`;
 
@@ -165,14 +166,15 @@ const _pickBestCandidate = (rawResults, {
   threshold,
   excludePlanId,
   excludeOwnerId,   // dùng cho public search (bỏ bài của chính mình)
+  excludeLessonId,  // [NEW] skip lesson đang edit
   topic,
   objective,
 }) => {
   for (const r of rawResults) {
-    if (r.score < threshold) break;                               // đã sort desc
+    if (r.score < threshold) break;
     if (excludePlanId && String(r.planId) === String(excludePlanId)) continue;
     if (excludeOwnerId && String(r.ownerId) === String(excludeOwnerId)) continue;
-
+    if (excludeLessonId && String(r.lessonId) === String(excludeLessonId)) continue;
     const topicText = r.topicText || '';
 
     if (!_titleOverlapOk(topicText, topic, objective)) {
@@ -361,6 +363,7 @@ const findReusableLesson = async (userId, topic, objective, opts = {}) => {
     threshold: PUBLIC_THRESHOLD,
     excludePlanId: currentPlanId,
     excludeOwnerId: userId,   // bỏ bài của chính mình
+    excludeLessonId: ownCandidate?.lessonId,
     topic,
     objective,
   });

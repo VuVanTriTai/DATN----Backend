@@ -31,8 +31,8 @@ const searchRelevantChunks = async (planId, queryEmbedding, limit = 5) => {
             index: "vector_index",
             path: "embedding",
             queryVector: queryEmbedding,
-            numCandidates: 100, // Tăng numCandidates để tăng cơ hội tìm thấy child propositions tốt
-            limit: limit * 4,    // Lấy nhiều hơn để sau đó map về Parent unique
+            numCandidates: 50, // 🔥 giảm load
+            limit: limit * 2,
             filter: { planId: oid },
           },
         },
@@ -41,9 +41,6 @@ const searchRelevantChunks = async (planId, queryEmbedding, limit = 5) => {
             content: 1,
             section: 1,
             topic: 1,
-            isChild: 1,
-            parentId: 1,
-            chunkIndex: 1,
             score: { $meta: "vectorSearchScore" },
           },
         },
@@ -57,9 +54,7 @@ const searchRelevantChunks = async (planId, queryEmbedding, limit = 5) => {
       return fallbackRandomChunks(oid, limit);
     }
 
-    // ── Parent-Child RAG Resolution ─────────────────────────────────────
-    const resolvedParents = await resolveParentDocs(oid, results);
-    return postProcess(resolvedParents, limit);
+    return postProcess(results, limit);
 
   } catch (error) {
     console.error("❌ searchRelevantChunks error:", error.message);
@@ -75,6 +70,11 @@ const searchRelevantChunks = async (planId, queryEmbedding, limit = 5) => {
  * Vector search có topic filter.
  * Chỉ trả về chunks thuộc các topic cho phép.
  * Nếu allowedTopics rỗng → fallback sang searchRelevantChunks (không filter).
+ *
+ * @param {string} planId
+ * @param {number[]} queryEmbedding
+ * @param {string[]} allowedTopics - ví dụ: ["date_function", "string_function"]
+ * @param {number} [limit=5]
  */
 const searchRelevantChunksByTopic = async (
   planId, queryEmbedding, allowedTopics = [], limit = 5
@@ -97,18 +97,22 @@ const searchRelevantChunksByTopic = async (
     let results = [];
 
     try {
+      // Atlas Vector Search có hỗ trợ pre-filter theo field
+      // NOTE: filter trong $vectorSearch chỉ dùng được khi field đó
+      // được index trong Atlas Vector Index dưới dạng "filter".
+      // Nếu chưa có, dùng $match sau $vectorSearch.
       results = await Chunk.aggregate([
         {
           $vectorSearch: {
             index: "vector_index",
             path: "embedding",
             queryVector: queryEmbedding,
-            numCandidates: 150,
-            limit: limit * 8,
+            numCandidates: Math.max(100, limit * 10),  // lấy nhiều để filter sau
+            limit: limit * 6,                           // rộng để sau $match có đủ
             filter: { planId: oid },
           },
         },
-        // Post-filter theo topic
+        // Post-filter theo topic (hoạt động dù Atlas filter field hay không)
         {
           $match: {
             topic: { $in: allowedTopics }
@@ -119,13 +123,10 @@ const searchRelevantChunksByTopic = async (
             content: 1,
             section: 1,
             topic: 1,
-            isChild: 1,
-            parentId: 1,
-            chunkIndex: 1,
             score: { $meta: "vectorSearchScore" },
           },
         },
-        { $limit: limit * 4 },
+        { $limit: limit * 2 },
       ]);
     } catch (err) {
       console.warn("⚠️ Topic vector search failed:", err.message);
@@ -136,54 +137,13 @@ const searchRelevantChunksByTopic = async (
       return fallbackTopicChunks(oid, allowedTopics, limit);
     }
 
-    const resolvedParents = await resolveParentDocs(oid, results);
-    return postProcess(resolvedParents, limit);
+    return postProcess(results, limit);
 
   } catch (error) {
     console.error("❌ searchRelevantChunksByTopic error:", error.message);
+    // Last-resort fallback: không filter topic
     return searchRelevantChunks(planId, queryEmbedding, limit);
   }
-};
-
-// ─────────────────────────────────────────────
-// RESOLVE PARENT DOCUMENTS FROM CHILD MATCHES
-// ─────────────────────────────────────────────
-
-const resolveParentDocs = async (oid, results) => {
-  if (!results?.length) return [];
-
-  // Lấy list parentIds (nếu doc là child thì lấy parentId, nếu không lấy _id)
-  const parentIds = results.map(r => r.isChild && r.parentId ? r.parentId : r._id);
-
-  // Query DB lấy thông tin đầy đủ của các Parent
-  const parents = await Chunk.find({
-    planId: oid,
-    _id: { $in: parentIds },
-    isChild: false // Chỉ lấy Parent Nodes thực sự
-  }).lean();
-
-  // Map parentId string sang Parent Object
-  const parentMap = new Map();
-  for (const p of parents) {
-    parentMap.set(p._id.toString(), {
-      ...p,
-      score: 0 // Khởi tạo score
-    });
-  }
-
-  // Gán score cho parent bằng max score của các child match
-  for (const r of results) {
-    const targetId = (r.isChild && r.parentId ? r.parentId : r._id).toString();
-    if (parentMap.has(targetId)) {
-      const parentNode = parentMap.get(targetId);
-      if (r.score > parentNode.score) {
-        parentNode.score = r.score;
-      }
-    }
-  }
-
-  // Trả về array parent docs đã gán score, sort theo score giảm dần
-  return Array.from(parentMap.values()).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 };
 
 // ─────────────────────────────────────────────
@@ -191,37 +151,35 @@ const resolveParentDocs = async (oid, results) => {
 // ─────────────────────────────────────────────
 
 const fallbackRandomChunks = async (oid, limit) => {
-  // Chỉ lấy Parent chunks cho generator
-  const docs = await Chunk.find({ planId: oid, isChild: false })
-    .select("content section topic chunkIndex")
+  const docs = await Chunk.find({ planId: oid })
+    .select("content section topic")
     .limit(limit * 2)
     .lean();
 
-  console.warn(`⚠️ Fallback DB → ${docs.length} parent chunks`);
+  console.warn(`⚠️ Fallback DB → ${docs.length} chunks`);
 
-  return postProcess(docs.map(d => ({ ...d, score: 1 })), limit);
+  return postProcess(docs, limit);
 };
 
 // Fallback: filter theo topic thôi, không có vector
 const fallbackTopicChunks = async (oid, allowedTopics, limit) => {
   const docs = await Chunk.find({
     planId: oid,
-    topic: { $in: allowedTopics },
-    isChild: false
+    topic: { $in: allowedTopics }
   })
-    .select("content section topic chunkIndex")
+    .select("content section topic")
     .limit(limit * 2)
     .lean();
 
-  console.warn(`⚠️ Topic Fallback DB → ${docs.length} parent chunks`);
+  console.warn(`⚠️ Topic Fallback DB → ${docs.length} chunks`);
 
+  // Nếu cạn không có chunk nào khớp topic → bỏ filter, lấy tất cả
   if (!docs.length) {
     return fallbackRandomChunks(oid, limit);
   }
 
-  return postProcess(docs.map(d => ({ ...d, score: 1 })), limit);
+  return postProcess(docs, limit);
 };
-
 
 // ─────────────────────────────────────────────
 // POST PROCESS (dedupe + trim)
@@ -237,12 +195,13 @@ const postProcess = (results, limit) => {
     unique.push(r);
   }
 
+  // ✅ FIX: giữ lại chunkIndex để caller có thể sort theo thứ tự gốc tài liệu
   const final = unique.slice(0, limit).map(r => ({
-    content: r.content.substring(0, 3000), // Tăng giới hạn để không mất chữ
+    content: r.content.substring(0, 2000), // 2000 chars × 6 chunks = 12000 ≤ MAX_CONTEXT_CHARS
     section: r.section || "",
     topic: r.topic || "general",
-    chunkIndex: r.chunkIndex,
-    score: r.score || 0.5
+    score: r.score || 0.5,
+    chunkIndex: r.chunkIndex ?? r.index ?? null,  // thứ tự gốc trong tài liệu
   }));
 
   console.log(`✅ Retrieved ${final.length} chunks`);
@@ -283,101 +242,37 @@ const normalizeSectionQuery = (s) => {
 };
 
 /**
- * Từ mỗi coveredSection tạo nhiều mẫu regex (3 tier) để khớp Chunk.section.
- *
- * Tier 1 — Exact title substring:  "1.1 Stored Procedure" → regex trên section field
- * Tier 2 — Section number only:    "1.1" → khớp chunk bất kể AI đặt tiêu đề gì
- * Tier 3 — Keyword-based:          Tài liệu không đánh số (luật, y khoa, thematic headings)
- *                                   Trích cụm 2 từ quan trọng để tìm kiếm
- *
- * Domain-agnostic: hoạt động với luật (Điều, Chương), y khoa, vật lý, kinh tế, lập trình...
+ * Từ mỗi coveredSection tạo 1–2 mẫu regex ngắn (dedupe) để khớp Chunk.section.
  */
 const buildSectionSearchPatterns = (coveredSections) => {
   const or = [];
   const seen = new Set();
 
-  const pushPattern = (fragment, field = "section") => {
+  const pushPattern = (fragment) => {
     const f = String(fragment || "").trim();
     if (f.length < 2) return;
-    // Tăng từ 40 → 60 để khớp tiêu đề dài hơn
-    const rx = escapeRegex(f).substring(0, 60);
+    const rx = escapeRegex(f).substring(0, 40);
     if (rx.length < 2) return;
-    const key = `${field}|${rx.toLowerCase()}`;
+    const key = rx.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
-    or.push({ [field]: { $regex: rx, $options: "i" } });
-  };
-
-  /**
-   * Trích từ khoá >= 4 ký tự, bỏ stop word đa ngôn ngữ.
-   * Strip diacritics → tăng khả năng khớp khi encoding section khác nhau.
-   */
-  const extractKeywords = (text) => {
-    const stopwords = new Set([
-      "cua", "trong", "cac", "mot", "cho", "voi", "nay", "ve", "theo",
-      "duoc", "bang", "khi", "sau", "truoc", "den", "tu", "tai", "nhung",
-      "the", "and", "for", "with", "that", "this", "are", "have", "has",
-      "from", "not", "but", "will", "all"
-    ]);
-    return text
-      .replace(/^#+\s*/, "")
-      .replace(/^\d+(?:\.\d+)*\s+/, "")
-      .toLowerCase()
-      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-      .split(/[\s\-_.,:;()[\]\/]+/)
-      .filter(w => w.length >= 4 && !stopwords.has(w) && !/^\d+$/.test(w));
+    or.push({ section: { $regex: rx, $options: "i" } });
   };
 
   for (const raw of coveredSections) {
     const norm = normalizeSectionQuery(raw);
     if (!norm) continue;
 
+    pushPattern(norm.substring(0, 40));
+
     const m = norm.match(/^(\d+(?:\.\d+)+)\s+(.+)/);
     if (m) {
-      const sectionNum = m[1];
-      const titlePart = m[2].trim();
-
-      // ── Tier 1: Section number alone ─────────────────────────────────────────
-      // KEY: "1.1" khớp "1.1 Bất kỳ tiêu đề nào" trong DB
-      pushPattern(sectionNum, "section");
-
-      // ── Tier 2: Section number at start of chunk content ─────────────────────
-      pushPattern(`${sectionNum} `, "content");
-
-      // ── Tier 3: First 3 meaningful words of title ────────────────────────────
-      const titleWords = titlePart
-        .split(/\s+/)
-        .filter(w => w.length >= 3)
-        .slice(0, 3)
-        .join(" ");
-      if (titleWords.length >= 4) {
-        const shortPhrase = `${sectionNum} ${titleWords}`.substring(0, 50);
-        pushPattern(shortPhrase, "section");
-      }
-
-      // ── Tier 4: First 2 title keywords ───────────────────────────────────────
-      const keywords = extractKeywords(norm);
-      for (const kw of keywords.slice(0, 3)) {
-        if (kw.length >= 5) pushPattern(kw, "content");
-      }
-
-    } else {
-      // ── Non-numbered heading ─────────────────────────────────────────────────
-      const origWords = norm
-        .replace(/^#+\s*/, "")
-        .split(/\s+/)
-        .filter(w => w.length >= 3);
-
-      if (origWords.length >= 2) {
-        pushPattern(origWords.slice(0, 2).join(" "), "section");
-        pushPattern(origWords.slice(0, 2).join(" "), "content");
-      } else if (origWords.length === 1) {
-        pushPattern(origWords[0], "section");
-      }
-
-      const keywords = extractKeywords(norm);
-      for (const kw of keywords.slice(0, 2)) {
-        if (kw.length >= 5) pushPattern(kw, "content");
+      const words = m[2].trim().split(/\s+/).slice(0, 4).join(" ");
+      if (words.length >= 2) {
+        const alt = `${m[1]} ${words}`.trim().substring(0, 40);
+        if (alt !== norm.substring(0, Math.min(40, norm.length))) {
+          pushPattern(alt);
+        }
       }
     }
   }
@@ -385,9 +280,14 @@ const buildSectionSearchPatterns = (coveredSections) => {
   return or;
 };
 
-const searchChunksBySection = async (planId, coveredSections, queryEmbedding, limit = 6, maxChars = 6500) => {
+const searchChunksBySection = async (planId, coveredSections, queryEmbedding, limit = 6) => {
   try {
     const oid = new mongoose.Types.ObjectId(planId);
+
+    // ❗ FIX: embedding invalid → fallback luôn
+    if (!Array.isArray(queryEmbedding)) {
+      return searchRelevantChunks(planId, queryEmbedding, limit);
+    }
 
     if (!coveredSections?.length) {
       return searchRelevantChunks(planId, queryEmbedding, limit);
@@ -398,129 +298,29 @@ const searchChunksBySection = async (planId, coveredSections, queryEmbedding, li
       return searchRelevantChunks(planId, queryEmbedding, limit);
     }
 
-    // 1. Tìm các chunk khớp trực tiếp với regex patterns
-    const matchedChunks = await Chunk.find({
+    const chunks = await Chunk.find({
       planId: oid,
-      isChild: false, // CHỈ tìm kiếm trên Parent Chunks
       $or: patterns
-    })
-      .select("content section embedding chunkIndex")
-      .sort({ chunkIndex: 1 })
-      .lean();
+    }).select("content section topic chunkIndex embedding").lean();
 
-    let chunks = [...matchedChunks];
-
-    // ✔ FIX 1: Lấy thêm các chunk lân cận liền kề (idx + 1, idx + 2) để tăng độ phủ (Coverage-aware retrieval)
-    // Đảm bảo không bỏ sót các sub-topics quan trọng nằm ngay sau tiêu đề chính (ví dụ: break/continue sau for/while)
-    if (matchedChunks.length > 0) {
-      const matchedIndexes = new Set(matchedChunks.map(c => c.chunkIndex));
-      const neighborIndexes = [];
-
-      for (const c of matchedChunks) {
-        if (typeof c.chunkIndex === 'number') {
-          if (!matchedIndexes.has(c.chunkIndex + 1)) neighborIndexes.push(c.chunkIndex + 1);
-          if (!matchedIndexes.has(c.chunkIndex + 2)) neighborIndexes.push(c.chunkIndex + 2);
-        }
-      }
-
-      if (neighborIndexes.length > 0) {
-        const neighbors = await Chunk.find({
-          planId: oid,
-          isChild: false,
-          chunkIndex: { $in: neighborIndexes }
-        })
-          .select("content section embedding chunkIndex")
-          .lean();
-
-        console.log(`📂 [RAG Neighbor] Đã nạp thêm ${neighbors.length} chunks lân cận để tăng độ phủ.`);
-        chunks.push(...neighbors);
-      }
-    }
-
-    console.log(`📂 Section search → ${chunks.length} total parent chunks matched | sections: ${coveredSections.slice(0, 2).join(', ')}`);
+    console.log(`📂 Section search → ${chunks.length} chunks`);
 
     if (!chunks.length) {
-      // Retry: chỉ dùng số mục (bỏ title)
-      const numOnlyPatterns = coveredSections
-        .map(s => (normalizeSectionQuery(s).match(/^(\d+(?:\.\d+)+)/) || [])[1])
-        .filter(Boolean)
-        .flatMap(n => [
-          { section: { $regex: `^${escapeRegex(n)}`, $options: "i" } },
-          { content: { $regex: `^${escapeRegex(n)}\\s`, $options: "m" } },
-        ]);
-
-      if (numOnlyPatterns.length) {
-        const retry = await Chunk.find({
-          planId: oid,
-          isChild: false,
-          $or: numOnlyPatterns
-        })
-          .select("content section embedding chunkIndex")
-          .sort({ chunkIndex: 1 })
-          .lean();
-        console.log(`📂 Section retry (num-only) → ${retry.length} parent chunks`);
-        chunks.push(...retry);
-      }
-
-      if (!chunks.length) {
-        console.warn(`[SectionSearch] No chunks found for sections: ${coveredSections.slice(0, 3).join(', ')} → global vector fallback`);
-        return searchRelevantChunks(planId, queryEmbedding, limit);
-      }
+      return searchRelevantChunks(planId, queryEmbedding, limit);
     }
 
-    // ── Score + re-order ─────────────────────────────────────────────────────────
-    const hasValidEmbedding = Array.isArray(queryEmbedding) && queryEmbedding.length > 0;
-    const MIN_SECTION_SCORE = 0.20;
-
-    const scored = chunks.map(c => ({
-      ...c,
-      score: hasValidEmbedding && Array.isArray(c.embedding)
-        ? cosineSim(queryEmbedding, c.embedding)
-        : 1,
-    }));
-
-    const filtered = hasValidEmbedding && scored.filter(c => c.score >= MIN_SECTION_SCORE).length >= 2
-      ? scored.filter(c => c.score >= MIN_SECTION_SCORE)
-      : scored;
-
-    // Sắp xếp theo score giảm dần
-    const sortedByScore = [...filtered].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-
-    // ✔ FIX 2: Chống hiện tượng Lost-in-the-Middle (Stanford Research)
-    // Sắp xếp các chunks có độ quan trọng cao nhất ở ĐẦU và CUỐI context, đẩy chunks phụ trợ vào giữa
-    const ordered = [];
-    for (let i = 0; i < sortedByScore.length; i++) {
-      if (i % 2 === 0) {
-        ordered.push(sortedByScore[i]); // Đưa chunk quan trọng chẵn vào cuối context
-      } else {
-        ordered.unshift(sortedByScore[i]); // Đưa chunk quan trọng lẻ lên đầu context
-      }
-    }
-
-    // ── Select + budget ─────────────────────────────────────────────────────────
-    const selected = [];
-    let totalChars = 0;
-    const perChunkMax = 3000;
-
-    for (const c of ordered) {
-      const content = String(c.content || "").substring(0, perChunkMax).trim();
-      if (!content || content.length < 40) continue;
-
-      if (totalChars + content.length > maxChars && selected.length >= 2) break;
-
-      selected.push({
-        content,
+    const scored = chunks
+      .filter(c => Array.isArray(c.embedding))
+      .map(c => ({
+        content: c.content.substring(0, 2000),
         section: c.section || "",
         topic: c.topic || "general",
-        chunkIndex: c.chunkIndex,
-        score: c.score ?? 1,
-      });
-      totalChars += content.length;
-      if (selected.length >= limit) break;
-    }
+        chunkIndex: c.chunkIndex ?? null,  // ✅ giữ thứ tự gốc
+        score: cosineSim(queryEmbedding, c.embedding)
+      }))
+      .sort((a, b) => b.score - a.score);
 
-    console.log(`📂 Section final: ${selected.length} chunks | ~${totalChars} chars`);
-    return selected.length ? selected : searchRelevantChunks(planId, queryEmbedding, limit);
+    return scored.slice(0, limit);
 
   } catch (err) {
     console.error("❌ searchChunksBySection error:", err.message);
@@ -531,8 +331,10 @@ const searchChunksBySection = async (planId, coveredSections, queryEmbedding, li
 // ─────────────────────────────────────────────
 // RE-RANK (OPTIONAL - SAFE)
 // ─────────────────────────────────────────────
+
 const reRank = async (query, docs) => {
   try {
+    // ❗ FIX: disable nếu không cần
     if (!docs?.length || !process.env.HF_TOKEN) {
       return docs;
     }
@@ -547,7 +349,7 @@ const reRank = async (query, docs) => {
       },
       {
         headers: { Authorization: `Bearer ${process.env.HF_TOKEN}` },
-        timeout: 5000
+        timeout: 5000 // 🔥 tránh treo
       }
     );
 

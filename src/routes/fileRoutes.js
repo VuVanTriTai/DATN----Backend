@@ -13,7 +13,7 @@ const verifyToken = require('../middlewares/authMiddleware');
 router.post(
     '/extract',
     verifyToken,
-    uploadLocal.single('file'), 
+    upload.single('file'), 
     fileController.extractText
 );
 

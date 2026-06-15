@@ -1,10 +1,6 @@
 const Plan = require("../models/Plan");
 const Lesson = require("../models/Lesson");
 const User = require("../models/User");
-const Chunk = require("../models/Chunk");
-const Enrollment = require("../models/Enrollment");
-const Assignment = require("../models/Assignment");
-const Progress = require("../models/Progress");
 
 // 1. Xem khái quát tiêu đề các ngày
 const getCoursePreview = async (req, res) => {
@@ -13,7 +9,7 @@ const getCoursePreview = async (req, res) => {
     const lessons = await Lesson.find({ planId: id, isDeleted: false })
       .select("dayNumber title summary") // Chỉ lấy tiêu đề và tóm tắt, không lấy content/quiz
       .sort({ dayNumber: 1 });
-
+    
     return res.success(lessons);
   } catch (error) {
     return res.error(error.message, 500);
@@ -38,7 +34,6 @@ const importCourse = async (req, res) => {
       title: sourcePlan.title,
       topic: sourcePlan.topic,
       owner: userId,
-      instructorId: sourcePlan.instructorId || null,
       duration: sourcePlan.duration,
       level: sourcePlan.level,
       learningFocus: sourcePlan.learningFocus,
@@ -88,7 +83,7 @@ const importCourse = async (req, res) => {
 const getMarketCourses = async (req, res) => {
   try {
     const { search, category, level, page = 1, limit = 12, instructorSearch } = req.query;
-
+    
     // Chỉ lấy những khóa học đã được bật isPublic
     const query = { isPublic: true, isDeleted: false };
 
@@ -111,7 +106,7 @@ const getMarketCourses = async (req, res) => {
       const matchedInstructors = await User.find({
         $or: [
           { fullName: { $regex: instructorSearch.trim(), $options: "i" } },
-          { email: { $regex: instructorSearch.trim(), $options: "i" } },
+          { email:    { $regex: instructorSearch.trim(), $options: "i" } },
         ],
       }).select("_id");
       query.owner = { $in: matchedInstructors.map(u => u._id) };
@@ -119,7 +114,6 @@ const getMarketCourses = async (req, res) => {
 
     const courses = await Plan.find(query)
       .populate("owner", "fullName email")
-      .populate("instructorId", "fullName email")
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -150,7 +144,6 @@ const getCoursesByInstructor = async (req, res) => {
       isDeleted: false,
     })
       .populate("owner", "fullName email")
-      .populate("instructorId", "fullName email")
       .sort({ createdAt: -1 })
       .lean();
     return res.success(courses);
@@ -167,10 +160,7 @@ const getMyListings = async (req, res) => {
   try {
     const userId = req.user.id;
     const courses = await Plan.find({
-      $or: [
-        { owner: userId },
-        { instructorId: userId }
-      ],
+      owner: userId,
       isPublic: true,
       isDeleted: false,
     })
@@ -205,34 +195,19 @@ const unlistCourse = async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    const plan = await Plan.findOne({
-      _id: id,
+    const plan = await Plan.findOne({ 
+      _id: id, 
       $or: [
         { owner: userId },
         { instructorId: userId }
-      ],
-      isDeleted: false
+      ], 
+      isDeleted: false 
     });
     if (!plan) return res.error("Không tìm thấy khóa học hoặc bạn không có quyền.", 404);
     if (!plan.isPublic) return res.error("Khóa học này chưa được đưa lên Market.", 400);
 
     plan.isPublic = false;
     await plan.save();
-
-    // ⚠️ Nếu khóa học đã được đánh dấu xóa ở dashboard (deletedByOwner hoặc deletedByInstructor)
-    // thì khi unlist khỏi Market, tiến hành dọn dẹp xóa cứng vì không còn được hiển thị ở đâu nữa.
-    const shouldHardDelete = plan.deletedByOwner && (!plan.instructorId || plan.deletedByInstructor);
-    if (shouldHardDelete) {
-      console.log(`🗑️ Khóa học đã unlist và trước đó đã bị xóa ở dashboard. Tiến hành xóa cứng: ${id}`);
-      await Promise.all([
-        Lesson.deleteMany({ planId: id }),
-        Chunk.deleteMany({ planId: id }),
-        Enrollment.deleteMany({ planId: id }),
-        Assignment.deleteMany({ planId: id }),
-        Progress.deleteMany({ planId: id }),
-      ]);
-      await Plan.findByIdAndDelete(id);
-    }
 
     return res.success(null, "Đã gỡ khóa học khỏi Market thành công.");
   } catch (error) {

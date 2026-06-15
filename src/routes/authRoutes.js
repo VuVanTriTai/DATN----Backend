@@ -45,7 +45,4 @@ router.put("/profile", verifyToken, authController.updateProfile);
 // 9. Đổi mật khẩu cá nhân (PUT /api/auth/change-password)
 router.put("/change-password", verifyToken, authController.changePassword);
 
-// 10. Đăng ký làm giáo viên (POST /api/auth/register-instructor)
-router.post("/register-instructor", verifyToken, authController.registerInstructor);
-
 module.exports = router;

@@ -45,10 +45,7 @@ router.post("/lesson/:lessonId/draft", verifyToken, checkRole(['instructor']), i
 // Gửi bản chỉnh sửa hoàn chỉnh cho học viên (merge draft → lesson + plan.status='reviewed')
 router.post("/course/:planId/send-back", verifyToken, checkRole(['instructor']), instructorController.finalizeReview);
 
-// Thêm ngày học mới vào lộ trình
-router.post("/course/:planId/lesson", verifyToken, checkRole(['instructor']), instructorController.addLesson);
 
-// Xóa ngày học khỏi lộ trình
-router.delete("/lesson/:lessonId", verifyToken, checkRole(['instructor']), instructorController.deleteLesson);
+
 
 module.exports = router;

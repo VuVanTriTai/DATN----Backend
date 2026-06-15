@@ -45,11 +45,13 @@ const uploadDocument = async (req, res) => {
 
     if (doc) {
       console.log("♻️ Tài liệu đã tồn tại.");
-      // Nếu bản ghi cũ thiếu link Cloudinary thì cập nhật bổ sung
-      if (!doc.fileUrl) {
+      // Nếu bản ghi cũ thiếu link hoặc đang chứa đường dẫn local cũ, nâng cấp lên link Cloudinary mới
+      const isOldLocal = doc.fileUrl && (doc.fileUrl.startsWith('uploads') || doc.fileUrl.includes('uploads/') || doc.fileUrl.includes('uploads\\'));
+      const isNewRemote = cloudinaryLink && cloudinaryLink.startsWith('http');
+      if (!doc.fileUrl || (isOldLocal && isNewRemote)) {
         doc.fileUrl = cloudinaryLink;
         await doc.save();
-        console.log("✅ Đã cập nhật bổ sung fileUrl cho tài liệu cũ.");
+        console.log("✅ Đã cập nhật/nâng cấp fileUrl lên Cloudinary cho tài liệu cũ.");
       }
       return res.success(doc, "Tài liệu đã tồn tại và đã được cập nhật liên kết.");
     }

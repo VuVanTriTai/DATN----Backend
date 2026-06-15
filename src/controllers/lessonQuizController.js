@@ -47,11 +47,12 @@ const getAdaptiveQuestions = async (req, res) => {
 
     // Ẩn correctAnswer và explanation trước khi gửi về client
     const safeQuestions = questions.map((q, idx) => ({
-      index:      idx,
-      question:   q.question,
-      options:    q.options,
-      difficulty: q.difficulty,
-      bloomLevel: q.bloomLevel,
+      index:        idx,
+      question:     q.question,
+      options:      q.options,
+      difficulty:   q.difficulty,
+      bloomLevel:   q.bloomLevel,
+      questionType: q.questionType || "singleChoice",
     }));
 
     return res.success({ questions: safeQuestions, userLevel, total: safeQuestions.length });
@@ -76,49 +77,28 @@ const submitAdaptive = async (req, res) => {
       return res.error("Thiếu planId, dayNumber hoặc answers", 400);
     }
 
-    const lesson = await Lesson.findById(lessonId);
+    const lesson = await Lesson.findById(lessonId).lean();
     if (!lesson) return res.error("Không tìm thấy bài học", 404);
 
-    // ── Lấy pool để chấm điểm (Ưu tiên bộ quiz thích ứng đã lưu trong lesson.quiz) ──
-    let pool = (Array.isArray(lesson.quiz) && lesson.quiz.length > 0) ? lesson.quiz : (lesson.quizPool || []);
+    // ── Lấy quiz pool (có fallback tự sinh) ──────────────────────────────────
+    let pool = lesson.quizPool || [];
 
     if (pool.length === 0) {
       console.log(`[submitAdaptive] Pool rỗng → tự sinh cho lesson ${lessonId}`);
       try {
-        const generatedPool = await lessonQuizService.generateQuizPool(lessonId);
-        pool = generatedPool;
+        pool = await lessonQuizService.generateQuizPool(lessonId);
       } catch (genErr) {
         console.warn("[submitAdaptive] generateQuizPool thất bại:", genErr.message);
       }
     }
 
-    // ── Pool rỗng: cho phép bỏ qua quiz, vẫn mở khoá ngày tiếp theo ────────
-    const poolEmpty = pool.length === 0;
-    if (poolEmpty) {
-      console.warn(`[submitAdaptive] Pool vẫn rỗng sau khi thử tạo → bypass quiz, mở khoá ngày tiếp theo (dayNumber=${dayNumber})`);
+    // Fallback sang quiz cũ nếu vẫn không có pool
+    if (pool.length === 0 && lesson.quiz?.length > 0) {
+      pool = lesson.quiz;
+    }
 
-      // Vẫn ghi nhận ngày đã hoàn thành (completedDays) với điểm 0
-      await Progress.findOneAndUpdate(
-        { userId, planId },
-        { $addToSet: { completedDays: Number(dayNumber) } },
-        { upsert: true }
-      );
-      await Lesson.findByIdAndUpdate(lessonId, { status: "completed" });
-
-      const adaptive = await lessonQuizService.processAdaptiveResult(
-        userId, planId, dayNumber, 0, lessonId
-      );
-
-      return res.success(
-        {
-          score: 0, total: 0, percentage: 0,
-          currentLevel: "INTERMEDIATE",
-          detailedResults: [],
-          adaptive,
-          quizBypassed: true,
-        },
-        "Quiz chưa sẵn sàng — đã mở khoá ngày tiếp theo."
-      );
+    if (pool.length === 0) {
+      return res.error("Bài học chưa có nội dung quiz. Vui lòng thử lại sau.", 400);
     }
 
     // ── Chuẩn hoá answers ────────────────────────────────────────────────────
@@ -157,6 +137,7 @@ const submitAdaptive = async (req, res) => {
         isCorrect,
         explanation:   q.explanation || "",
         difficulty:    q.difficulty  || "medium",
+        questionType:  q.questionType || "singleChoice",
       };
     });
 

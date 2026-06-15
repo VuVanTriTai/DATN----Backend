@@ -52,10 +52,12 @@ const getMyFriends = async (req, res) => {
       .populate('recipient', 'fullName email role')
       .sort({ updatedAt: -1 });
 
-    const friends = friendships.map(f => {
-      const friend = f.requester._id.toString() === meId ? f.recipient : f.requester;
-      return { friendshipId: f._id, friend, since: f.updatedAt };
-    });
+    const friends = friendships
+      .filter(f => f.requester && f.recipient) // Phòng hờ người dùng bị xóa khỏi hệ thống
+      .map(f => {
+        const friend = f.requester._id.toString() === meId ? f.recipient : f.requester;
+        return { friendshipId: f._id, friend, since: f.updatedAt };
+      });
 
     return res.success(friends);
   } catch (e) {
@@ -73,11 +75,13 @@ const getPendingRequests = async (req, res) => {
     }).populate('requester', 'fullName email role')
       .sort({ createdAt: -1 });
 
-    return res.success(requests);
+    const validRequests = requests.filter(r => r.requester); // Phòng hờ requester bị xóa khỏi hệ thống
+    return res.success(validRequests);
   } catch (e) {
     return res.error(e.message, 500);
   }
 };
+
 
 // ── Gửi lời mời kết bạn ──────────────────────────────────────────────────
 const sendRequest = async (req, res) => {

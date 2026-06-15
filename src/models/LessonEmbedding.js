@@ -2,11 +2,7 @@
 // Lưu vector embedding (title + summary) của mỗi bài học đã tạo.
 // Dùng để tra cứu ngữ nghĩa khi tái sử dụng bài học cho khoá học mới.
 //
-// ⚠️  YÊU CẦU: Tạo thủ công trên MongoDB Atlas một Vector Search Index tên
-//     "lesson_vector_index" trên collection "lessonembeddings", field "embedding",
-//     dimensions = 384,   ← sửa từ 1024
-//     similarity = cosine.
-//     Model: Xenova/all-MiniLM-L6-v2
+
 
 const mongoose = require("mongoose");
 
