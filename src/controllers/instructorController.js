@@ -339,12 +339,14 @@ const createManualCourse = async (req, res) => {
       planId: newPlan._id,
       dayNumber: i + 1,
       title: `Ngày ${i + 1}`,
-      content: "",
-      summary: "",
+      // content required:true trong Lesson model → dùng placeholder Markdown
+      content: `## Ngày ${i + 1}\n\n*(Chưa có nội dung — hãy soạn thảo tại đây)*`,
+      summary: '',
       importantNotes: [],
       quiz: [],
       quizPool: [],
-      status: "pending",
+      // Lesson status enum: 'locked' | 'in-progress' | 'completed'
+      status: 'locked',
       isDeleted: false,
     }));
 
