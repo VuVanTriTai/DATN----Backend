@@ -1,23 +1,25 @@
 {
-  "fileName": "DB - Lesson 04.docx",
+  "fileName": "Stored procedures.docx",
   "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "wordCount": 2402,
-  "lineCount": 1940,
+  "wordCount": 959,
+  "lineCount": 97,
   "tableCount": 0,
   "extractMethod": "docling",
   "pages": 0,
-  "headingCount": 2,
-  "hasFormulas": true,
+  "headingCount": 0,
+  "hasFormulas": false,
   "codeBlockCount": 0,
-  "bulletItemCount": 6,
+  "bulletItemCount": 3,
   "estimatedComplexity": "low",
-  "qualityIssues": [],
+  "qualityIssues": [
+    "no_headings"
+  ],
   "qualityStats": {
-    "words": 2274,
-    "headingCount": 2,
-    "shortRatio": 44,
-    "viRatio": 13.8,
-    "gluedRatio": 2,
+    "words": 961,
+    "headingCount": 0,
+    "shortRatio": 10,
+    "viRatio": 0,
+    "gluedRatio": 1,
     "isSlidePdf": false
   }
 }

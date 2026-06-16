@@ -582,7 +582,6 @@ const extractCodeIdentifiers = (text) => {
 // để inject vào prompt bắt buộc AI phải cover đầy đủ
 // ─────────────────────────────
 const extractKeyFacts = (text) => {
-  // ✅ Decode HTML entities trước khi extract (chunks cũ trong DB có thể có &lt; &gt;)
   const src = String(text || "")
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
     .replace(/&#\d+;/g, '');
@@ -592,22 +591,33 @@ const extractKeyFacts = (text) => {
   const numberedLines = src.match(/^\s*\d+[.)\-]\s+.{10,}/gm) || [];
   numberedLines.forEach(l => facts.push(l.trim()));
 
-  // 2. Phân loại có số lượng: "X loại:", "X trường hợp:", "X nhóm:"
-  const classificationLines = src.match(/.{5,}(?:loại|trường hợp|nhóm|kiểu|dạng|cách|mức|bước)\s*[:]\.?.{5,}/gi) || [];
-  classificationLines.forEach(l => facts.push(l.trim().slice(0, 200)));
+  // 2. Phân loại (VI): "X loại:", "X trường hợp:", "X nhóm:"
+  const classVI = src.match(/.{5,}(?:loại|trường hợp|nhóm|kiểu|dạng|cách|mức|bước)\s*[:]\.?.{5,}/gi) || [];
+  classVI.forEach(l => facts.push(l.trim().slice(0, 200)));
 
-  // 3. Định nghĩa rõ ràng: "X là Y", "X được định nghĩa là"
-  const defLines = src.match(/.{5,}(?:là một|là tập|là quá trình|được định nghĩa).{10,}/gi) || [];
-  defLines.forEach(l => facts.push(l.trim().slice(0, 200)));
+  // 2b. Phân loại (EN): "N types of", "N categories", "N steps"
+  const classEN = src.match(/.{5,}(?:types? of|categories|methods|steps|phases|stages|levels|forms|kinds)\s*.{5,}/gi) || [];
+  classEN.forEach(l => facts.push(l.trim().slice(0, 200)));
 
-  // 4. Bullet points quan trọng: "◦ ...", "• ...", "- ..."
+  // 3. Định nghĩa (VI): "X là Y", "X được định nghĩa là"
+  const defVI = src.match(/.{5,}(?:là một|là tập|là quá trình|được định nghĩa).{10,}/gi) || [];
+  defVI.forEach(l => facts.push(l.trim().slice(0, 200)));
+
+  // 3b. Định nghĩa (EN): "X is defined as", "X refers to"
+  const defEN = src.match(/.{5,}(?:is defined as|refers to|is a |are the ).{10,}/gi) || [];
+  defEN.forEach(l => facts.push(l.trim().slice(0, 200)));
+
+  // 4. Bullet points quan trọng
   const bullets = src.match(/^\s*[◦•*\-] {1,}[A-ZÀ-ỹ].{15,}/gm) || [];
-  bullets.slice(0, 6).forEach(l => facts.push(l.trim()));
+  bullets.slice(0, 8).forEach(l => facts.push(l.trim()));
 
-  // Loại bỏ trùng lặp và giới hạn
+  // 5. Headings trong context — để AI không bỏ sót section nào
+  const headings = src.match(/^#{1,3}\s+.{5,}/gm) || [];
+  headings.slice(0, 6).forEach(l => facts.push(l.trim()));
+
   return [...new Set(facts)]
     .filter(f => f.length >= 15)
-    .slice(0, 12);
+    .slice(0, 15);
 };
 
 // ─────────────────────────────────────────────────────────
@@ -1654,6 +1664,7 @@ const generateLessonContent = async ({
   keyFacts,
   previousSummaries, dayNumber, totalDays, item,
   usedConcepts,   // ← MỚI: concept memory từ các ngày trước
+  contextWeakHint,
 }) => {
   const budget = getDynamicLessonBudget(totalDays || 7);
   // Luôn dùng MODEL_SMART: prompt ~7000 tokens + budget output → 8b model (8192 ctx) không đủ
@@ -1794,13 +1805,15 @@ if (isDeep && isPractice) {
 // =========================
 // MAIN PROMPT
 // =========================
-const contentPrompt = `Bạn là AI viết bài giảng.
-
-⚠️ QUY TẮC BẮT BUỘC:
-- CHỈ dùng thông tin từ CONTEXT bên dưới
-- KHÔNG suy diễn, KHÔNG thêm kiến thức ngoài CONTEXT
+const contentPrompt = `Bạn là BIÊN TẬP VIÊN giáo dục. Nhiệm vụ: TỔ CHỨC LẠI kiến thức từ tài liệu gốc thành bài giảng có cấu trúc.
+${contextWeakHint ? contextWeakHint + "\n" : ""}
+⚠️ QUY TẮC BẮT BUỘC (vi phạm = bài bị huỷ):
+- CHỈ dùng thông tin CÓ TRONG CONTEXT bên dưới — đây là nguồn duy nhất
+- KHÔNG suy diễn, KHÔNG thêm kiến thức ngoài CONTEXT dưới bất kỳ hình thức nào
 - KHÔNG lặp lại nội dung các bài trước
-- Nếu thiếu dữ liệu → dừng lại, KHÔNG bịa
+- Nếu CONTEXT không đề cập → viết "[Tài liệu không đề cập]" thay vì tự bịa
+- ƯU TIÊN trích dẫn nguyên văn hoặc diễn giải sát nghĩa từ CONTEXT
+- Mỗi luận điểm PHẢI có cơ sở trong CONTEXT — không được tự thêm ví dụ bịa
 ${conceptMemoryBlock}
 ${codeExampleHint}
 ${requiredFactsBlock}
@@ -1898,10 +1911,8 @@ YÊU CẦU FORMAT:
       messages: [
         {
           role: "system",
-          // ✅ IMPROVEMENT: System prompt đổi từ “viết sáng tạo” sang “biên tập từ tài liệu”
-          // Giảm hallucination bằng cách buộc AI được cảnh báo ngoài role mở đầu
           content:
-            "Bạn là biên tập viên giáo dục. Nhiệm vụ là TỔ CHỨC LẠI nội dung từ tài liệu gốc, TUYTỆT ĐỐI không được thêm kiến thức ngoài CONTEXT. Nếu không có thông tin trong CONTEXT → viết [Tài liệu không đề cập] thay vì tự thêm vào.",
+            "Bạn là biên tập viên giáo dục. Nhiệm vụ là TỔ CHỨC LẠI nội dung từ tài liệu gốc, TUYỆT ĐỐI không được thêm kiến thức ngoài CONTEXT. Nếu không có thông tin trong CONTEXT → viết [Tài liệu không đề cập] thay vì tự thêm vào.",
         },
         {
           role: "user",
@@ -2204,7 +2215,7 @@ const generateSyllabus = async (rawText, numDays, learningGoalsInput = null) => 
     `{"dayNumber":${i + 1},"title":"...","objective":"...","bloomLevel":"${getBloomLevel(i, numDays).label}","coveredSections":["..."]}`
   ).join(',\n');
 
-  const syllabusPrompt = `Bạn là chuyên gia thiết kế chương trình học.
+  const syllabusPrompt = `Bạn là chuyên gia biên tập và thiết kế chương trình học.
 
 ⚠️ BẮT BUỘC: Trả về ĐÚNG ${numDays} object trong mảng "syllabus".
 ⚠️ KHÔNG ĐƯỢC dừng sớm. Mảng syllabus phải có ĐÚNG ${numDays} phần tử.
@@ -2218,12 +2229,13 @@ MỤC TIÊU: ${syllabusBiasInstructions(learningGoals)}
 BLOOM từng ngày:
 ${bloomHints}
 
-QUY TẮC:
-1. Bao phủ toàn bộ outline
-2. Không trùng lặp chủ đề
-3. coveredSections KHÔNG được rỗng
-4. Logic: cơ bản → nâng cao
-5. Tiêu đề <= 6 từ
+QUY TẮC BẮT BUỘC:
+1. Bạn là người BIÊN TẬP/PHÂN CHIA bài học từ tài liệu gốc. KHÔNG tự sáng tạo thêm kiến thức mới không có trong tài liệu.
+2. Bao phủ toàn bộ outline của tài liệu gốc, KHÔNG bỏ sót bất kỳ phần hay chương quan trọng nào trong outline trên.
+3. Không trùng lặp chủ đề giữa các ngày.
+4. coveredSections KHÔNG được rỗng và các phần tử trong đó phải lấy trực tiếp hoặc bám cực sát theo outline của tài liệu gốc.
+5. Sắp xếp logic từ cơ bản → nâng cao.
+6. Tiêu đề bài học ngắn gọn (<= 6 từ).
 
 TRẢ VỀ JSON sau (điền đầy đủ ${numDays} ngày):
 {
@@ -2726,8 +2738,9 @@ const generateScientificLesson = async (
       context = ordered.map((c) => c.content).join("\n---\n");
     }
 
-    // ✅ FIX: tăng limit để không cắt mất ví dụ code dài
-    context = context.slice(0, 7500);
+    // ✅ FIX: tăng limit để không cắt mất kiến thức quan trọng + ví dụ code dài
+    // 70b model có 128k context → 9000 chars (~3000 tokens) vẫn an toàn
+    context = context.slice(0, 9000);
 
     const formulaNotesFromContext =
       extractFormulaLikeNotes(context);
@@ -2737,6 +2750,13 @@ const generateScientificLesson = async (
 
     // ✅ FIX: Trích xuất các sự kiện/phân loại quan trọng để AI không bỏ sót
     const keyFactsFromContext = extractKeyFacts(context);
+
+    // ✅ FIX: Cảnh báo khi context quá ngắn — AI không nên cố viết dài khi thiếu dữ liệu
+    let contextWeakHint = "";
+    if (context.length < 500 && context !== "Không có context.") {
+      contextWeakHint = "\n⚠️ CONTEXT RẤT NGẮN — chỉ viết những gì có trong CONTEXT, bài có thể ngắn, KHÔNG CỐ kéo dài.";
+      console.warn(`[ContextWeak] Day ${item.day} — context chỉ có ${context.length} ký tự`);
+    }
 
     // ─────────────────────────────
     // PHASE 1: CONTENT
@@ -2752,6 +2772,7 @@ const generateScientificLesson = async (
       context,
       codeIdentifiers: codeIdentifiersFromContext,
       keyFacts: keyFactsFromContext,
+      contextWeakHint,
       previousSummaries,
       dayNumber: item.day,
       totalDays,

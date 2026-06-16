@@ -999,6 +999,76 @@ const getSharedWithMe = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
+// 🔄 TẠO LẠI NỘI DUNG BÀI HỌC BẰNG AI (REGENERATE LESSON)
+// Route: POST /api/plan/:id/lesson/:dayNumber/regenerate
+// Cho phép học viên yêu cầu AI viết lại hoàn toàn nội dung bài học đang mở,
+// vẫn sử dụng RAG từ tài liệu gốc để đảm bảo độ chính xác.
+// ─────────────────────────────────────────────
+const regenerateLesson = async (req, res) => {
+  try {
+    const { id: planId, dayNumber } = req.params;
+    const learnerId = req.user.id;
+
+    // 1. Lấy thông tin plan & lesson hiện tại
+    const plan = await Plan.findById(planId);
+    if (!plan) return res.error('Không tìm thấy lộ trình', 404);
+    if (plan.owner.toString() !== learnerId) return res.error('Bạn không có quyền thực hiện thao tác này', 403);
+
+    const lesson = await Lesson.findOne({ planId, dayNumber: Number(dayNumber), isDeleted: false });
+    if (!lesson) return res.error('Không tìm thấy bài học', 404);
+
+    const learningGoals = normalizeLearningGoals({
+      focus: plan.learningFocus || 'theory',
+      depth: plan.learningDepth || 'basic',
+    });
+
+    // 2. Xây dựng item (cùng format với generateLessonsParallel)
+    const item = {
+      day: Number(dayNumber),
+      topic: lesson.title,
+      objective: lesson.summary || `Nắm vững nội dung ${lesson.title}`,
+      coveredSections: lesson.coverage || [],
+      bloomLevel: '',
+      totalDays: plan.duration || 7,
+    };
+
+    console.log(`🔄 Regenerate Day ${dayNumber}: "${lesson.title}" | Plan: ${planId}`);
+
+    // 3. Gọi AI sinh lại nội dung (không kiểm tra tái sử dụng)
+    const detail = await planService.generateScientificLesson(
+      planId,
+      item,
+      learnerId,
+      [],
+      [],
+      learningGoals,
+      [],
+      []
+    );
+
+    // 4. Lưu lại nội dung mới vào DB
+    await Lesson.findByIdAndUpdate(lesson._id, {
+      content:        detail.content,
+      summary:        detail.summary        || lesson.summary,
+      importantNotes: detail.importantNotes || [],
+      quiz:           detail.quiz           || [],
+      // Xoá quizPool cũ để hệ thống sinh pool trắc nghiệm mới khi học viên vào tab Quiz
+      quizPool: [],
+    });
+
+    console.log(`✅ Regenerate done: Day ${dayNumber} | Plan: ${planId}`);
+
+    return res.success(
+      { dayNumber: Number(dayNumber) },
+      'Đã tạo lại nội dung bài học thành công!'
+    );
+  } catch (error) {
+    console.error('🔥 regenerateLesson error:', error);
+    return res.error('AI gặp sự cố khi tạo lại bài học: ' + error.message, 500);
+  }
+};
+
+// ─────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────
 module.exports = {
@@ -1016,6 +1086,7 @@ module.exports = {
 
   // Lesson
   getLessonDetail,
+  regenerateLesson,
   getPlanResults,
 
   // Instructor

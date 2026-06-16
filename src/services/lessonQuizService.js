@@ -117,19 +117,18 @@ const _extractSmartContext = (lesson, domain) => {
 // ── Domain-Specific Prompt Instruction ────────────────────────────────────────
 const _getDomainInstruction = (domain, focus, depth) => {
   const styles = {
-    math:        "Tạo BÀI TOÁN CỤ THỂ với số liệu thực. Mỗi câu phải yêu cầu tính toán hoặc chứng minh. Đáp án phải là kết quả số, bước giải, hoặc nhận dạng công thức đúng. TUYỆT ĐỐI không hỏi định nghĩa suông.",
-    physics:     "Tạo tình huống vật lý cụ thể (vật ném, mạch điện, sóng...) với số liệu. Yêu cầu áp dụng công thức/định luật để tính kết quả hoặc chọn phân tích đúng. Đáp án phải kèm đơn vị đo.",
-    chemistry:   "Tạo bài toán hóa học: cân bằng phương trình, tính mol/nồng độ/khối lượng, nhận dạng sản phẩm phản ứng. Đáp án là con số cụ thể hoặc công thức hóa học.",
-    cs:          "Tạo câu hỏi phân tích code/thuật toán: output của đoạn code, độ phức tạp O(n), lỗi logic, chọn cấu trúc dữ liệu phù hợp cho bài toán cụ thể. Chèn code snippet ngắn vào câu hỏi khi cần.",
-    biology:     "Tạo tình huống sinh học: cơ chế phân tử, phân tích kết quả thí nghiệm, liên kết cấu trúc–chức năng. Đáp án là tên cơ chế/quá trình sinh học chính xác.",
-    medicine:    "Tạo tình huống lâm sàng: bệnh nhân X có triệu chứng Y, hỏi chẩn đoán/cơ chế/điều trị phù hợp. Đáp án là lựa chọn lâm sàng cụ thể, không chung chung.",
-    economics:   "Tạo tình huống kinh tế: dữ liệu thị trường, chính sách thuế, tỷ giá... Yêu cầu phân tích tác động hoặc tính toán chỉ số kinh tế cụ thể.",
-    law:         "Tạo tình huống pháp lý giả định cụ thể (hợp đồng tranh chấp, hành vi vi phạm...). Hỏi điều khoản áp dụng, hậu quả pháp lý, hoặc so sánh quy định. Đáp án là lựa chọn pháp lý có căn cứ.",
-    history:     "Tạo câu hỏi phân tích sự kiện lịch sử: nguyên nhân–hậu quả, so sánh các giai đoạn, đánh giá tác động của nhân vật/chính sách. KHÔNG chỉ hỏi năm tháng hay tên sự kiện.",
-    psychology:  "Tạo tình huống hành vi/tâm lý cụ thể (trường hợp lâm sàng, thí nghiệm...). Hỏi cơ chế tâm lý, chẩn đoán, hoặc giải thích hành vi theo lý thuyết học được.",
-    engineering: "Tạo bài toán kỹ thuật có thông số cụ thể (tải trọng, vật liệu, điều kiện biên...). Yêu cầu tính toán hoặc chọn giải pháp thiết kế phù hợp. Đáp án kèm đơn vị.",
-    // ── FALLBACK THÔNG MINH: yêu cầu model tự phân tích nội dung ──────────────
-    general:     "Đọc kỹ nội dung bài học và xác định: (1) Các khái niệm/quy trình/nguyên lý cốt lõi. (2) Tạo tình huống giả định hoặc bài toán nhỏ đòi hỏi VẬN DỤNG từng khái niệm đó — KHÔNG chỉ nhắc lại định nghĩa. (3) Các đáp án sai phải là những lựa chọn hợp lý gây nhầm lẫn thực sự.",
+    math:        "Nếu bài học chứa công thức và số liệu tính toán, hãy tạo bài toán nhỏ áp dụng công thức để tính toán kết quả cụ thể. Nếu bài học chỉ thuần lý thuyết/định nghĩa, hãy hỏi về định lý, tính chất hình học hoặc nhận dạng công thức đúng. TUYỆT ĐỐI không hỏi định nghĩa suông.",
+    physics:     "Nếu bài học chứa số liệu/công thức cụ thể, hãy tạo bài toán tính toán kết quả (kèm đơn vị đo). Nếu bài học thiên về mô tả lý thuyết, hãy hỏi về bản chất hiện tượng, nguyên lý hoạt động hoặc định luật.",
+    chemistry:   "Nếu bài học chứa số liệu/công thức cụ thể, hãy tạo bài toán tính toán kết quả (như cân bằng phương trình, tính mol/nồng độ). Nếu bài học thiên về mô tả lý thuyết, hãy hỏi về tính chất chất, hiện tượng phản ứng hoặc quy tắc an toàn.",
+    cs:          "Nếu bài học chứa mã nguồn (code snippet) hoặc thuật toán/mã giả (pseudocode), hãy tạo câu hỏi phân tích code (dự đoán output, lỗi logic, độ phức tạp O(n), cấu trúc dữ liệu phù hợp). Nếu bài học thuần lý thuyết (như Trí tuệ nhân tạo, Học máy, Khái niệm mạng, v.v.) và không có mã nguồn, hãy tạo câu hỏi về khái niệm cốt lõi, so sánh ưu/nhược điểm hoặc nguyên lý hoạt động của các thành phần.",
+    biology:     "Tạo tình huống sinh học hoặc câu hỏi phân tích cơ chế: cơ chế phân tử, phân tích thí nghiệm, mối quan hệ giữa cấu trúc và chức năng. Đáp án là tên cơ chế/quá trình/phát biểu sinh học chính xác.",
+    medicine:    "Tạo tình huống lâm sàng giả định (bệnh nhân X có triệu chứng Y, hỏi chẩn đoán/cơ chế/hướng điều trị phù hợp). Đáp án là lựa chọn y khoa cụ thể, không chung chung.",
+    economics:   "Tạo tình huống kinh tế hoặc bài toán kinh tế vĩ mô/vi phân tích tác động chính sách, dữ liệu thị trường. Yêu cầu phân tích xu hướng hoặc tính toán chỉ số kinh tế cụ thể.",
+    law:         "Tạo tình huống pháp lý giả định (tranh chấp hợp đồng, hành vi vi phạm pháp luật). Hỏi về điều khoản áp dụng, trách nhiệm pháp lý hoặc cách giải quyết. Đáp án là lựa chọn pháp lý có căn cứ.",
+    history:     "Tạo câu hỏi phân tích sự kiện lịch sử: mối quan hệ nguyên nhân–kết quả, so sánh các thời kỳ, đánh giá tác động của nhân vật/sự kiện lịch sử. KHÔNG hỏi ghi nhớ ngày tháng hay tên sự kiện một cách đơn giản.",
+    psychology:  "Tạo tình huống hành vi/tâm lý (trường hợp lâm sàng, mô tả hành vi). Hỏi về cơ chế tâm lý lý giải hành vi đó hoặc lý thuyết liên quan.",
+    engineering: "Tạo bài toán kỹ thuật hoặc phân tích hệ thống có thông số cụ thể. Yêu cầu tính toán thiết kế hoặc chọn giải pháp tối ưu. Đáp án kèm đơn vị.",
+    general:     "Xác định các khái niệm/quy trình/nguyên lý cốt lõi của bài học. Tạo tình huống giả định hoặc câu hỏi đòi hỏi thông hiểu, phân tích, so sánh hoặc vận dụng thực tế — KHÔNG chỉ hỏi định nghĩa suông."
   };
 
   let domainLine = styles[domain] || styles.general;
@@ -155,16 +154,25 @@ const _buildPrompt = (title, context, count, easyCount, mediumCount, hardCount, 
   return `Tạo ĐÚNG ${count} câu trắc nghiệm (JSON) cho bài: "${title}"
 Domain: ${domain} | Focus: ${focus} | Depth: ${depth}
 
-NỘI DUNG BÀI HỌC:
+NỘI DUNG BÀI HỌC (nguồn thông tin duy nhất, KHÔNG tự bịa các lý thuyết hay công thức mới ngoài bài học):
 ${context}
 ===
 
 LUẬT CHẤT LƯỢNG (bắt buộc):
 - ${domainInstruction}
+- CHỈ tạo câu hỏi/bài toán liên quan đến nội dung bài học ở trên.
+- **HÌNH THỨC CÂU HỎI (\`question\`):** Phải là một câu hỏi trọn vẹn (kết thúc bằng dấu hỏi chấm \`?\`) hoặc một câu trích khuyết/mệnh đề chưa hoàn chỉnh cần được điền tiếp (kết thúc bằng dấu hai chấm \`:\`). **TUYỆT ĐỐI không sử dụng một câu khẳng định suông làm câu hỏi** (ví dụ: Không dùng "Mạng lưới sâu là mô hình..." làm câu hỏi).
+- **KHÔNG CHÈN TIỀN TỐ THỨ TỰ:** **TUYỆT ĐỐI KHÔNG** viết các ký tự thứ tự phương án như "A. ", "B. ", "C. ", "D. " hay "1. ", "2. ", "a. ", "b. " vào nội dung của các đáp án trong mảng \`options\`. Đáp án phải được viết trực tiếp.
+- **NỘI DUNG CÁC ĐÁP ÁN (\`options\`):**
+  - Phải ngắn gọn, rõ ràng, diễn đạt tự nhiên và độc lập với nhau.
+  - **TRÁNH tạo đáp án sai bằng cách phủ định lười biếng** (tức là sao chép nguyên văn đáp án đúng rồi chỉ thêm/bớt từ phủ định như "không", "nhưng không", "chưa"...). Ví dụ: Đáp án đúng là "Giúp nhận diện hình ảnh tốt hơn", thì không được tạo đáp án sai kiểu "Giúp nhận diện hình ảnh tốt hơn, nhưng không giúp phân loại hình ảnh". Thay vào đó, hãy dùng một khái niệm sai hoặc một công dụng khác.
+  - Tránh các đáp án quá dài dòng, lặp đi lặp lại phần lớn nội dung của câu hỏi hoặc lặp lại lẫn nhau.
+  - Các đáp án sai phải là các lỗi hiểu sai phổ biến, các lựa chọn hợp lý dễ gây nhầm lẫn nếu học viên không học kỹ bài.
+- Khuyến khích tạo các bài toán vận dụng thực tế, bài tập tính toán hoặc câu hỏi tình huống dựa trên lý thuyết/công thức trong bài học (học viên tự tính toán hoặc suy luận để chọn đáp án đúng, không bắt buộc câu hỏi phải trích nguyên văn từ tài liệu).
 - 4 đáp án (A/B/C/D): cụ thể, khác nhau, không trùng ý, không "Tất cả đúng/sai", không "Không thể xác định"
 - Đáp án SAI phải hợp lý (gây nhầm lẫn thực sự nếu không nắm vững), KHÔNG phải ngẫu nhiên
 - CẤM đáp án bắt đầu bằng "Đúng" hoặc "Sai"
-- explanation: giải thích rõ tại sao đáp án đúng (≥15 từ)
+- explanation: giải thích rõ tại sao đáp án đúng và các bước giải/suy luận (≥15 từ)
 
 PHÂN BỔ ĐỘ KHÓ (tổng = ${count}):
 - easy: ${easyCount} câu — Nhận biết/Ghi nhớ
@@ -172,7 +180,7 @@ PHÂN BỔ ĐỘ KHÓ (tổng = ${count}):
 - hard: ${hardCount} câu — Phân tích/Đánh giá
 
 FORMAT JSON (chỉ trả JSON, không text thêm):
-{"questions":[{"question":"...","options":["A...","B...","C...","D..."],"correctAnswer":0,"explanation":"...","difficulty":"easy","bloomLevel":"Nhận biết","questionType":"singleChoice"}]}`;
+{"questions":[{"question":"...","options":["Đáp án đúng hoặc sai thứ nhất","Đáp án đúng hoặc sai thứ hai","Đáp án đúng hoặc sai thứ ba","Đáp án đúng hoặc sai thứ tư"],"correctAnswer":0,"explanation":"...","difficulty":"easy","bloomLevel":"Nhận biết","questionType":"singleChoice"}]}`;
 };
 
 // ── Batch Generate — model chain (fast → smart) ───────────────────────────────
@@ -272,11 +280,36 @@ const generateQuizPool = async (lessonId) => {
     throw new Error("Không thể sinh câu hỏi — tất cả batch đều thất bại.");
   }
 
-  // Lọc chất lượng
-  let valid = allQuestions.filter(_validateQuizQuestion);
+  // Lọc và chuẩn hoá chất lượng
+  const cleanedQuestions = allQuestions.map((q) => {
+    if (!q || typeof q !== "object") return q;
+
+    // Loại bỏ các tiền tố như "Câu 1: ", "Câu 1. " từ nội dung câu hỏi
+    if (typeof q.question === "string") {
+      let qText = q.question.trim().replace(/^câu\s*\d+\s*[\.\:\-\s]\s*/i, "");
+      // Tự động thêm dấu hỏi nếu câu hỏi kết thúc lửng lơ
+      if (qText && !qText.endsWith("?") && !qText.endsWith(":") && !qText.endsWith(".")) {
+        qText += "?";
+      }
+      q.question = qText;
+    }
+
+    // Loại bỏ tiền tố như "A. ", "B. ", "1. ", "a) " từ các phương án lựa chọn
+    if (Array.isArray(q.options)) {
+      q.options = q.options.map((opt) =>
+        typeof opt === "string"
+          ? opt.trim().replace(/^[A-Da-d1-4]\s*[\.\)\-\:\s]\s*/, "")
+          : opt
+      );
+    }
+
+    return q;
+  });
+
+  let valid = cleanedQuestions.filter(_validateQuizQuestion);
   if (valid.length < Math.ceil(totalTarget * 0.6)) {
     // Fallback: lọc cơ bản nếu strict filter loại quá nhiều
-    valid = allQuestions.filter(
+    valid = cleanedQuestions.filter(
       (q) => q?.question && Array.isArray(q?.options) && q.options.length === 4 &&
              !isNaN(Number(q?.correctAnswer)) && Number(q.correctAnswer) >= 0 && Number(q.correctAnswer) <= 3
     );

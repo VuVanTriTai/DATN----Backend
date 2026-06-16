@@ -103,6 +103,7 @@ const getCourseDashboardStats = async (req, res) => {
         return res.success({
             planId: plan._id,
             planTitle: plan.title,
+            ownerId: plan.owner?._id,
             studentName: plan.owner?.fullName || "Học viên chưa xác định",
             studentEmail: plan.owner?.email,
             studentCount: enrollments.length,

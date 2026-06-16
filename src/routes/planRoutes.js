@@ -40,6 +40,10 @@ router.get("/:id", verifyToken, planController.getPlanDetails);
 // 7. Lấy nội dung chi tiết bài học của ngày cụ thể (GET /api/plan/:id/lesson/:dayNumber)
 router.get("/:id/lesson/:dayNumber", verifyToken, planController.getLessonDetail);
 
+// 7b. Tạo lại nội dung bài học bằng AI (POST /api/plan/:id/lesson/:dayNumber/regenerate)
+// Học viên sở hữu lộ trình có thể yêu cầu AI viết lại bài giảng, RAG vẫn dùng tài liệu gốc.
+router.post("/:id/lesson/:dayNumber/regenerate", verifyToken, checkRole(['learner']), planController.regenerateLesson);
+
 // 8. Xóa lộ trình học (soft-delete) (DELETE /api/plan/:id)
 router.delete("/:id", verifyToken, planController.deletePlan);
 

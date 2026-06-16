@@ -123,7 +123,8 @@ const getMarketCourses = async (req, res) => {
 
     return res.success({
       courses,
-      totalPages: Math.ceil(total / limit),
+      total,
+      totalPages: Math.ceil(total / Number(limit)),
       currentPage: Number(page)
     });
   } catch (error) {

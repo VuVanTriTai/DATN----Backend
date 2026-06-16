@@ -11,6 +11,7 @@ const QuizPoolItem = new mongoose.Schema({
   options:       [{ type: String }],               // 4 đáp án lựa chọn
   correctAnswer: { type: Number, required: true }, // Index của đáp án đúng (0, 1, 2, 3)
   explanation:   { type: String, default: '' },    // Lời giải thích tại sao đúng
+  evidence:      { type: String, default: '' },    // Đoạn trích dẫn từ tài liệu/bài học dùng làm cơ sở cho câu hỏi
   difficulty:    { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' }, // Độ khó
   bloomLevel:    { type: String, default: 'Thông hiểu' }, // Thang đo Bloom (Biết, Hiểu, Vận dụng,...)
   questionType:  { type: String, enum: ['singleChoice', 'multipleStatements'], default: 'singleChoice' }, // Loại câu hỏi
